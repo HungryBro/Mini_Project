@@ -1,0 +1,14 @@
+path: .
+train: images/train
+val: images/val
+test: images/test
+nc: 8
+names:
+- bus
+- car
+- motorbike
+- pickup
+- taxi
+- truck
+- truck trailer
+- van

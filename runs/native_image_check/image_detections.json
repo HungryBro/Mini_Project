@@ -1,0 +1,196 @@
+{
+  "source": "taksin_bridge_sathorn/image/image.png",
+  "mode": "image_detection",
+  "classes": {
+    "0": "bus",
+    "1": "car",
+    "5": "truck"
+  },
+  "detections_by_class": {
+    "bus": [
+      {
+        "class_id": 0,
+        "track_id": null,
+        "confidence": 0.9704,
+        "bbox_xyxy": [
+          744.32,
+          297.82,
+          823.39,
+          444.16
+        ],
+        "bottom_center": [
+          783.86,
+          444.16
+        ]
+      }
+    ],
+    "car": [
+      {
+        "class_id": 1,
+        "track_id": null,
+        "confidence": 0.6982,
+        "bbox_xyxy": [
+          815.26,
+          227.57,
+          836.87,
+          256.62
+        ],
+        "bottom_center": [
+          826.07,
+          256.62
+        ]
+      },
+      {
+        "class_id": 1,
+        "track_id": null,
+        "confidence": 0.6854,
+        "bbox_xyxy": [
+          946.38,
+          398.53,
+          970.64,
+          452.66
+        ],
+        "bottom_center": [
+          958.51,
+          452.66
+        ]
+      },
+      {
+        "class_id": 1,
+        "track_id": null,
+        "confidence": 0.6639,
+        "bbox_xyxy": [
+          798.48,
+          431.25,
+          843.53,
+          505.85
+        ],
+        "bottom_center": [
+          821.0,
+          505.85
+        ]
+      },
+      {
+        "class_id": 1,
+        "track_id": null,
+        "confidence": 0.5205,
+        "bbox_xyxy": [
+          666.47,
+          442.33,
+          714.87,
+          512.36
+        ],
+        "bottom_center": [
+          690.67,
+          512.36
+        ]
+      },
+      {
+        "class_id": 1,
+        "track_id": null,
+        "confidence": 0.4261,
+        "bbox_xyxy": [
+          873.52,
+          241.81,
+          900.04,
+          292.27
+        ],
+        "bottom_center": [
+          886.78,
+          292.27
+        ]
+      },
+      {
+        "class_id": 1,
+        "track_id": null,
+        "confidence": 0.3343,
+        "bbox_xyxy": [
+          892.88,
+          207.2,
+          910.43,
+          232.74
+        ],
+        "bottom_center": [
+          901.65,
+          232.74
+        ]
+      },
+      {
+        "class_id": 1,
+        "track_id": null,
+        "confidence": 0.2779,
+        "bbox_xyxy": [
+          843.0,
+          228.05,
+          866.42,
+          267.57
+        ],
+        "bottom_center": [
+          854.71,
+          267.57
+        ]
+      },
+      {
+        "class_id": 1,
+        "track_id": null,
+        "confidence": 0.2727,
+        "bbox_xyxy": [
+          880.81,
+          167.47,
+          896.42,
+          190.35
+        ],
+        "bottom_center": [
+          888.62,
+          190.35
+        ]
+      },
+      {
+        "class_id": 1,
+        "track_id": null,
+        "confidence": 0.2435,
+        "bbox_xyxy": [
+          1078.99,
+          64.32,
+          1106.11,
+          101.19
+        ],
+        "bottom_center": [
+          1092.55,
+          101.19
+        ]
+      },
+      {
+        "class_id": 1,
+        "track_id": null,
+        "confidence": 0.2425,
+        "bbox_xyxy": [
+          1164.87,
+          65.66,
+          1198.75,
+          103.51
+        ],
+        "bottom_center": [
+          1181.81,
+          103.51
+        ]
+      },
+      {
+        "class_id": 1,
+        "track_id": null,
+        "confidence": 0.2221,
+        "bbox_xyxy": [
+          679.12,
+          697.38,
+          760.03,
+          834.86
+        ],
+        "bottom_center": [
+          719.58,
+          834.86
+        ]
+      }
+    ]
+  },
+  "note": "A single image has detections but no temporal track IDs; use video mode for ByteTrack IDs."
+}

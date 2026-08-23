@@ -18,5 +18,5 @@ archive/                             ไฟล์เก่าหรือเอ�
 ```
 
 Dataset ที่ใช้อยู่ตอนนี้คือ `data/taksin_vehicles/external/thai_cars_native/`
-และคงคลาสเดิมจาก Thai-Cars ทั้งหมด ดูคำสั่งเทรนและใช้งานต่อได้ที่
+โดยคงคลาสรถเดิมจาก Thai-Cars และตัด `human` ออก ดูคำสั่งเทรนและใช้งานต่อได้ที่
 [`training/README.md`](training/README.md)

@@ -1,17 +1,17 @@
 # ชุดเทรนรถบนสะพานตากสิน
 
-## ใช้คลาสเดิมจาก Thai-Cars
+## ใช้คลาสเดิมจาก Thai-Cars (ยกเว้น human)
 
-ชุด `data/Thai-Cars.v2i.yolov11` มีคลาสเดิม 9 คลาส (`bus`, `car`, `human`,
-`motorbike`, `pickup`, `taxi`, `truck`, `truck trailer`, `van`) และเป็น polygon
-segmentation จึงต้องแปลงเป็นกรอบก่อนใช้กับตัวติดตามปัจจุบัน:
+ชุดต้นฉบับ `data/Thai-Cars.v2i.yolov11` มี 9 คลาส แต่ชุดที่ใช้เทรนจะตัด
+`human` ออก เหลือ 8 คลาส (`bus`, `car`, `motorbike`, `pickup`, `taxi`, `truck`,
+`truck trailer`, `van`) และเป็น polygon segmentation จึงต้องแปลงเป็นกรอบ:
 
 ```bash
-python training/convert_thai_cars_native.py
+python training/convert_thai_cars_native.py --exclude-classes human --overwrite
 ```
 
-ผลลัพธ์อยู่ที่ `data/taksin_vehicles/external/thai_cars_native/` โดยไม่รวมคลาส
-และไม่ลบ `human` ออก ส่วน polygon จะถูกเปลี่ยนเป็นกรอบสี่เหลี่ยมเท่านั้น
+ผลลัพธ์อยู่ที่ `data/taksin_vehicles/external/thai_cars_native/` โดยตัด
+`human` ออกและเปลี่ยน polygon เป็นกรอบสี่เหลี่ยมเท่านั้น
 
 เริ่มเทรนแบบคงคลาสเดิม:
 
@@ -27,11 +27,15 @@ python training/train.py \
 ```bash
 python vehicle_tracking.py --model runs/thai_cars_native/yolo11n_native/weights/best.pt \
   --source taksin_bridge_sathorn/video/taksin_bridge_sathorn_1min.mp4 \
-  --classes 'car,truck,bus,van,motorbike,taxi,pickup,human,truck trailer'
+  --classes 'car,truck,bus,van,motorbike,taxi,pickup,truck trailer' \
+  --merge-taxi
 ```
 
-ปัจจุบันใช้คลาสจาก Thai-Cars เดิมทั้งหมด ไม่ได้รวม `pickup`, `taxi` หรือ `van`
-เข้ากับ `car` และไม่ได้ตัด `human` ออก
+`--merge-taxi` จะให้โมเดลตรวจ `taxi` ต่อไป แต่รวมชื่อผลลัพธ์และการนับเป็น `car`
+โดยไม่ต้องเทรนใหม่
+
+ปัจจุบันใช้คลาสจาก Thai-Cars เดิมโดยไม่รวม `pickup`, `taxi` หรือ `van`
+เข้ากับ `car` และตัด `human` ออกตามที่กำหนด
 
 ## ลำดับทำงาน
 
@@ -76,7 +80,7 @@ python vehicle_tracking.py --model runs/thai_cars_native/yolo11n_native/weights/
    python training/split_reviewed_dataset.py
    ```
 
-6. เทรนชุด 9 คลาสปัจจุบัน:
+6. เทรนชุด 8 คลาสปัจจุบัน:
 
    ```bash
    python training/train.py --device mps

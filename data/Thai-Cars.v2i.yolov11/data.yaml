@@ -1,0 +1,13 @@
+train: ../train/images
+val: ../valid/images
+test: ../test/images
+
+nc: 9
+names: ['bus', 'car', 'human', 'motorbike', 'pickup', 'taxi', 'truck', 'truck trailer', 'van']
+
+roboflow:
+  workspace: s-workspace-ia1ty
+  project: thai-cars-24alv
+  version: 2
+  license: CC BY 4.0
+  url: https://universe.roboflow.com/s-workspace-ia1ty/thai-cars-24alv/dataset/2
