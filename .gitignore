@@ -1,1 +1,22 @@
+# Local-only project material
+# Keep source media, datasets, model weights, generated previews, and reports
+# out of the GitHub repository. The training scripts document their paths.
+data/
+model/
+runs/
+graphify-out/
+archive/
+tmp/
+taksin_bridge_sathorn/
+srirat_south_cam02/
+
+# YOLO weights, caches, and generated config files
+*.pt
+*.cache
+*.resolved.yaml
+
+# OS/editor metadata
+.DS_Store
+
+# Local planning notes
 Project_Plan.md
