@@ -16,12 +16,16 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("data/taksin_vehicles/external/thai_cars_native/data.yaml"),
     )
-    parser.add_argument("--weights", default="model/yolo11m.pt", help="COCO weights or a compatible Thailand-vehicle checkpoint")
+    parser.add_argument(
+        "--weights",
+        default="model/coco/yolo11m.pt",
+        help="COCO weights or a compatible Thailand-vehicle checkpoint",
+    )
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--imgsz", type=int, default=960)
     parser.add_argument("--batch", type=int, default=-1, help="-1 automatically fits available memory")
     parser.add_argument("--device", default=None, help="For example mps, cpu, or 0")
-    parser.add_argument("--project", type=Path, default=Path("runs/taksin_training"))
+    parser.add_argument("--project", type=Path, default=Path("model/taksin"))
     parser.add_argument("--name", default="yolo11m_native")
     return parser.parse_args()
 

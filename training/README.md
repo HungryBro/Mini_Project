@@ -18,15 +18,15 @@ python training/convert_thai_cars_native.py --exclude-classes human --overwrite
 ```bash
 python training/train.py \
   --data data/taksin_vehicles/external/thai_cars_native/data.yaml \
-  --weights model/yolo11n.pt --epochs 50 --imgsz 640 --device cpu \
-  --project runs/thai_cars_native --name yolo11n_native
+  --weights model/coco/yolo11n.pt --epochs 50 --imgsz 640 --device cpu \
+  --project model/taksin --name yolo11n_native
 ```
 
 เมื่อนำโมเดลไปติดตาม ให้ระบุชื่อคลาสตาม dataset:
 
 ```bash
-python vehicle_tracking.py --model runs/thai_cars_native/yolo11n_native/weights/best.pt \
-  --source taksin_bridge_sathorn/video/taksin_bridge_sathorn_1min.mp4 \
+python vehicle_tracking.py --model model/taksin/yolo11n_native/weights/best.pt \
+  --source locations/taksin/video/taksin_bridge_sathorn_1min.mp4 \
   --classes 'car,truck,bus,van,motorbike,taxi,pickup,truck trailer' \
   --merge-taxi
 ```
@@ -86,7 +86,7 @@ python vehicle_tracking.py --model runs/thai_cars_native/yolo11n_native/weights/
    python training/train.py --device mps
    ```
 
-   โมเดลที่ได้อยู่ใต้ `runs/taksin_training/yolo11m_native/weights/best.pt` แล้วนำไปใช้กับ `vehicle_tracking.py` ด้วย `--model` ได้
+   โมเดลที่ได้อยู่ใต้ `model/taksin/yolo11m_native/weights/best.pt` แล้วนำไปใช้กับ `vehicle_tracking.py` ด้วย `--model` ได้
 
 ## ข้อควรระวัง
 

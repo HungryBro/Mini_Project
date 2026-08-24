@@ -23,7 +23,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Pre-label bridge frames for human review")
     parser.add_argument("--source", type=Path, default=Path("data/taksin_vehicles/raw/images"))
     parser.add_argument("--review-root", type=Path, default=Path("data/taksin_vehicles/review"))
-    parser.add_argument("--model", default="model/yolo11m.pt", help="COCO model or another .pt checkpoint")
+    parser.add_argument("--model", default="model/coco/yolo11m.pt", help="COCO model or another .pt checkpoint")
     parser.add_argument("--conf", type=float, default=0.10, help="Low threshold keeps candidates for review")
     parser.add_argument("--imgsz", type=int, default=960)
     parser.add_argument("--device", default=None, help="For example mps, cpu, or 0")

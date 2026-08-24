@@ -4,6 +4,9 @@
 graphify-out/
 archive/
 tmp/
+runs/
+locations/
+model/
 
 # YOLO weights, caches, and generated config files
 *.cache

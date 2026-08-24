@@ -14,7 +14,7 @@ from pathlib import Path
 import cv2
 
 
-DEFAULT_VIDEOS = sorted(Path("taksin_bridge_sathorn/video").glob("*.mp4"))
+DEFAULT_VIDEOS = sorted(Path("locations/taksin/video").glob("*.mp4"))
 
 
 def parse_args() -> argparse.Namespace:
