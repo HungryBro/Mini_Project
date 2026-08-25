@@ -379,7 +379,7 @@ class SignalVideoReader:
         self.next_frame = 0
         self.last_frame: np.ndarray | None = None
 
-    def states_at(self, elapsed_seconds: float) -> dict[str, str]:
+    def states_at(self, elapsed_seconds: float) -> dict[str, dict[str, str]]:
         target = max(0, round((elapsed_seconds + self.offset_seconds) * self.fps))
         if target < self.next_frame:
             self.capture.set(cv2.CAP_PROP_POS_FRAMES, target)
@@ -391,18 +391,59 @@ class SignalVideoReader:
             self.last_frame = frame
             self.next_frame += 1
         if self.last_frame is None:
-            return {f"lane_{index}": "unknown" for index in range(1, 5)}
-        signal_rois = signal_rois_for_camera(self.last_frame, self.camera)
-        return {lane: classify_signal_state(self.last_frame, polygon) for lane, polygon in signal_rois.items()}
+            return {
+                f"lane_{index}": {"primary": "unknown"}
+                for index in range(1, 5)
+            }
+        return classify_signal_roi_states(self.last_frame, self.camera)
 
     def close(self) -> None:
         self.capture.release()
 
 
-def signal_rois_for_camera(frame: np.ndarray, camera: str) -> dict[str, np.ndarray]:
+def signal_rois_for_camera(frame: np.ndarray, camera: str) -> dict[str, dict[str, np.ndarray]]:
     if camera == "156":
         return camera_156_signal_rois(frame)
     return camera_147_signal_rois(frame)
+
+
+def classify_signal_roi_states(frame: np.ndarray, camera: str) -> dict[str, dict[str, str]]:
+    """Read every primary/backup LED ROI for one signal camera."""
+    return {
+        lane: {name: classify_signal_state(frame, polygon) for name, polygon in roi_set.items()}
+        for lane, roi_set in signal_rois_for_camera(frame, camera).items()
+    }
+
+
+def resolve_signal_roi_states(
+    roi_states: dict[str, dict[str, str]]
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Select one reliable LED colour per lane from its primary/backup ROIs.
+
+    The primary remains authoritative when it is readable.  A backup takes
+    over only when the primary is ``unknown``.  If two readable backup ROIs
+    disagree, the lane is kept unknown rather than guessing.
+    """
+    resolved: dict[str, str] = {}
+    source: dict[str, str] = {}
+    for index in range(1, 5):
+        lane = f"lane_{index}"
+        values = roi_states.get(lane, {})
+        primary = values.get("primary", "unknown")
+        backup_values = [
+            state for name, state in values.items()
+            if name != "primary" and state in {"green", "red"}
+        ]
+        if primary in {"green", "red"}:
+            resolved[lane] = primary
+            source[lane] = "primary"
+        elif len(set(backup_values)) == 1 and backup_values:
+            resolved[lane] = backup_values[0]
+            source[lane] = "backup"
+        else:
+            resolved[lane] = "unknown"
+            source[lane] = "unknown"
+    return resolved, source
 
 
 def box_is_inside_roi(box, roi_points: np.ndarray | None) -> bool:
@@ -572,7 +613,8 @@ def draw_bridge_guides(
     lane_signals: dict[str, dict[str, object]] | None = None,
 ) -> None:
     """Draw the selected ROI, fused lane directions, and optional Taksin gates."""
-    cv2.polylines(frame, [roi_points], isClosed=True, color=(0, 255, 0), thickness=3, lineType=cv2.LINE_AA)
+    # Keep the outer polygon as the detection filter, but show only the
+    # individual lane guides so the camera-112 view stays uncluttered.
     for lane_name, polygon in (lane_points or {}).items():
         summary = (lane_signals or {}).get(lane_name, {})
         direction = str(summary.get("direction", "unknown"))
@@ -621,19 +663,31 @@ def draw_signal_guides(
     frame: np.ndarray,
     camera: str,
     signal_states: dict[str, str],
+    roi_states: dict[str, dict[str, str]] | None = None,
+    selected_sources: dict[str, str] | None = None,
 ) -> None:
-    """Draw a signal camera's four LED ROIs with their raw colours."""
+    """Draw all primary/backup LED ROIs and their selected lane states."""
     rois = signal_rois_for_camera(frame, camera)
+    roi_states = roi_states or {}
+    selected_sources = selected_sources or {}
     panel_lines: list[tuple[str, tuple[int, int, int]]] = [(f"CAMERA {camera} LIGHTS", (255, 255, 255))]
     for index in range(1, 5):
         lane = f"lane_{index}"
-        polygon = rois[lane]
         light = signal_states.get(lane, "unknown")
         direction = direction_from_signal(camera, light)
         # green/red are the actual LED colours.  Yellow is only for unknown.
         color = {"green": (0, 220, 0), "red": (0, 0, 255)}.get(light, (0, 220, 220))
-        cv2.polylines(frame, [polygon], True, color, 2, cv2.LINE_AA)
-        panel_lines.append((f"112 L{index}: light={light} -> {direction}", color))
+        labels: list[str] = []
+        for roi_name, polygon in rois[lane].items():
+            roi_light = roi_states.get(lane, {}).get(roi_name, "unknown")
+            roi_color = {"green": (0, 220, 0), "red": (0, 0, 255)}.get(roi_light, (0, 220, 220))
+            cv2.polylines(frame, [polygon], True, roi_color, 2, cv2.LINE_AA)
+            labels.append(f"{roi_name[0].upper()}={roi_light}")
+        source = selected_sources.get(lane, "unknown")
+        panel_lines.append((
+            f"112 L{index}: {' '.join(labels)} -> {light} ({source}) -> {direction}",
+            color,
+        ))
     draw_text_panel(frame, panel_lines, "bottom_left")
 
 
@@ -792,19 +846,19 @@ def render_signal_view(source: Path, output_dir: Path, camera: str) -> tuple[Pat
                 ok, frame = capture.read()
                 if not ok:
                     break
-                raw_states = {
-                    lane: classify_signal_state(frame, polygon)
-                    for lane, polygon in signal_rois_for_camera(frame, camera).items()
-                }
+                roi_states = classify_signal_roi_states(frame, camera)
+                raw_states, selected_sources = resolve_signal_roi_states(roi_states)
                 states = smoother.update(raw_states)
                 annotated = frame.copy()
-                draw_signal_guides(annotated, camera, states)
+                draw_signal_guides(annotated, camera, states, roi_states, selected_sources)
                 writer.write(annotated)
                 record = {
                     "frame": frame_number,
                     "time_seconds": round(frame_number / fps, 3),
                     "camera": camera,
+                    "light_roi_states": roi_states,
                     "light_states": states,
+                    "selected_light_source": selected_sources,
                     "directions_for_camera_112": {
                         lane: direction_from_signal(camera, light)
                         for lane, light in states.items()
@@ -852,13 +906,21 @@ def run_image(
     lane_points = lane_rois(result.orig_img, profile) if show_lanes else None
     states_147: dict[str, str] = {}
     states_156: dict[str, str] = {}
+    roi_states_147: dict[str, dict[str, str]] = {}
+    roi_states_156: dict[str, dict[str, str]] = {}
+    selected_147: dict[str, str] = {}
+    selected_156: dict[str, str] = {}
     reader_147 = SignalVideoReader(signal147_source, "147", signal147_offset) if signal147_source else None
     reader_156 = SignalVideoReader(signal156_source, "156", signal156_offset) if signal156_source else None
     if reader_147:
-        states_147 = SignalStateSmoother().update(reader_147.states_at(0.0))
+        roi_states_147 = reader_147.states_at(0.0)
+        raw_states_147, selected_147 = resolve_signal_roi_states(roi_states_147)
+        states_147 = SignalStateSmoother().update(raw_states_147)
         reader_147.close()
     if reader_156:
-        states_156 = SignalStateSmoother().update(reader_156.states_at(0.0))
+        roi_states_156 = reader_156.states_at(0.0)
+        raw_states_156, selected_156 = resolve_signal_roi_states(roi_states_156)
+        states_156 = SignalStateSmoother().update(raw_states_156)
         reader_156.close()
     lane_signals = fuse_lane_signals(states_147, states_156)
     allowed_by_lane = {lane: str(summary["direction"]) for lane, summary in lane_signals.items()}
@@ -896,8 +958,12 @@ def run_image(
         if bridge_only and show_gates
         else None,
         "detections_by_class": grouped,
+        "signal_147_roi_states": roi_states_147,
         "signal_147_states": states_147,
+        "signal_147_selected_light_source": selected_147,
+        "signal_156_roi_states": roi_states_156,
         "signal_156_states": states_156,
+        "signal_156_selected_light_source": selected_156,
         "lane_signal_fusion": lane_signals,
         "lane_direction_rule": "147: green=up/red=down; 156: green=down/red=up; unknown uses the other camera",
         "note": "A single image has detections but no temporal track IDs; use video mode for ByteTrack IDs.",
@@ -974,8 +1040,10 @@ def run_video(
                 elapsed_seconds = frame_number / fps
                 roi_points = bridge_roi(result.orig_img, profile) if bridge_only else None
                 lane_points = lane_rois(result.orig_img, profile) if show_lanes else None
-                raw_147 = reader_147.states_at(elapsed_seconds) if reader_147 else {}
-                raw_156 = reader_156.states_at(elapsed_seconds) if reader_156 else {}
+                roi_states_147 = reader_147.states_at(elapsed_seconds) if reader_147 else {}
+                roi_states_156 = reader_156.states_at(elapsed_seconds) if reader_156 else {}
+                raw_147, selected_147 = resolve_signal_roi_states(roi_states_147) if roi_states_147 else ({}, {})
+                raw_156, selected_156 = resolve_signal_roi_states(roi_states_156) if roi_states_156 else ({}, {})
                 states_147 = smoother_147.update(raw_147) if raw_147 else {}
                 states_156 = smoother_156.update(raw_156) if raw_156 else {}
                 lane_signals = fuse_lane_signals(states_147, states_156)
@@ -1028,8 +1096,12 @@ def run_video(
                     "frame": frame_number,
                     "time_seconds": round(elapsed_seconds, 3),
                     "camera_profile": profile,
+                    "signal_147_roi_states": roi_states_147,
                     "signal_147_states": states_147,
+                    "signal_147_selected_light_source": selected_147,
+                    "signal_156_roi_states": roi_states_156,
                     "signal_156_states": states_156,
+                    "signal_156_selected_light_source": selected_156,
                     "lane_signal_fusion": lane_signals,
                     "lane_directions": allowed_by_lane,
                     "tracks_by_class": grouped,
