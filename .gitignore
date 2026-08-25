@@ -7,6 +7,7 @@ tmp/
 runs/
 locations/
 model/
+map/
 
 # YOLO weights, caches, and generated config files
 *.cache
