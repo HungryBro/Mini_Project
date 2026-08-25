@@ -19,15 +19,17 @@ def _polygon(points: list[list[int]]) -> np.ndarray:
     return np.asarray(points, dtype=np.int32)
 
 
-# Camera 112: whole bridge roadway and four lane polygons, numbered from left
-# to right in the camera image.  The four top caps divide the outer ROI's
-# [331, 41] -> [428, 41] edge continuously, so their visible top line is level.
+# Camera 112: the full scan area sent to YOLO, followed by four smaller lane
+# polygons used only to assign each detected vehicle to a lane.  Keeping these
+# two jobs separate means a vehicle is never hidden from YOLO merely because
+# its bottom-centre falls close to a lane boundary.
 CAMERA_112_ROI = _polygon(
     [
-        [331, 41], [428, 41], [453, 76], [494, 137], [544, 212],
-        [598, 302], [638, 372], [675, 447], [5, 443], [3, 427],
-        [52, 345], [100, 286], [141, 236], [183, 188], [235, 135],
-        [277, 94], [315, 57], [328, 41],
+        [6, 254], [98, 178], [184, 114], [233, 82], [282, 47],
+        [303, 40], [315, 32], [361, 29], [421, 28], [446, 25],
+        [475, 41], [498, 69], [544, 102], [598, 150], [633, 198],
+        [696, 259], [748, 308], [773, 354], [782, 398], [793, 444],
+        [5, 443], [4, 252],
     ]
 )
 

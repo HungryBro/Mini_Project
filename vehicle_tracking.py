@@ -131,6 +131,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--conf", type=float, default=0.16)
     parser.add_argument(
+        "--raw",
+        action="store_true",
+        help="Run raw per-frame detection only; do not create or retain ByteTrack IDs",
+    )
+    parser.add_argument(
         "--iou",
         type=float,
         default=0.30,
@@ -454,6 +459,23 @@ def box_is_inside_roi(box, roi_points: np.ndarray | None) -> bool:
     return point_is_inside_roi(((x1 + x2) / 2, y2), roi_points)
 
 
+def box_is_inside_lanes(box, lane_points: dict[str, np.ndarray] | None) -> bool:
+    """Keep a vehicle only when its tyre-side centre falls in one of 4 lanes."""
+    if not lane_points:
+        return True
+    x1, _y1, x2, y2 = box.xyxy[0].cpu().tolist()
+    return point_lane(((x1 + x2) / 2, y2), lane_points) is not None
+
+
+def mask_outside_roi(frame: np.ndarray, roi_points: np.ndarray | None) -> np.ndarray:
+    """Hide pixels outside the selected scan area before raw YOLO inference."""
+    if roi_points is None:
+        return frame
+    mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+    cv2.fillPoly(mask, [roi_points.astype(np.int32)], 255)
+    return cv2.bitwise_and(frame, frame, mask=mask)
+
+
 def point_is_inside_roi(bottom_center: tuple[float, float], roi_points: np.ndarray | None) -> bool:
     if roi_points is None:
         return True
@@ -478,6 +500,7 @@ def stabilized_tracks(
     class_map: dict[int, str],
     class_aliases: dict[str, str],
     roi_points: np.ndarray | None,
+    lane_points: dict[str, np.ndarray] | None,
     memory: dict[int, TrackState],
     frame_number: int,
     hold_frames: int,
@@ -491,7 +514,11 @@ def stabilized_tracks(
         ids = boxes.id.int().cpu().tolist()
         for box, track_id in zip(boxes, ids):
             class_id = int(box.cls.item())
-            if class_id not in class_map or not box_is_inside_roi(box, roi_points):
+            if (
+                class_id not in class_map
+                or not box_is_inside_roi(box, roi_points)
+                or not box_is_inside_lanes(box, lane_points)
+            ):
                 continue
             xyxy = [float(value) for value in box.xyxy[0].cpu().tolist()]
             center = ((xyxy[0] + xyxy[2]) / 2, (xyxy[1] + xyxy[3]) / 2)
@@ -572,6 +599,21 @@ def gate_endpoints(roi_points: np.ndarray, y_normalized: float, frame_height: in
     return tuple(sorted(intersections))  # left, right
 
 
+def horizontal_polygon_span(polygon: np.ndarray, target_y: int) -> tuple[int, int] | None:
+    """Return the left/right intersections of a lane polygon at one y level."""
+    intersections: list[float] = []
+    for start, end in zip(polygon, np.roll(polygon, -1, axis=0)):
+        x1, y1 = map(float, start)
+        x2, y2 = map(float, end)
+        if y1 == y2 or not min(y1, y2) <= target_y <= max(y1, y2):
+            continue
+        ratio = (target_y - y1) / (y2 - y1)
+        intersections.append(x1 + ratio * (x2 - x1))
+    if len(intersections) < 2:
+        return None
+    return round(min(intersections)), round(max(intersections))
+
+
 def draw_text_panel(
     frame: np.ndarray,
     lines: list[tuple[str, tuple[int, int, int]]],
@@ -615,22 +657,28 @@ def draw_bridge_guides(
     """Draw the selected ROI, fused lane directions, and optional Taksin gates."""
     # Keep the outer polygon as the detection filter, but show only the
     # individual lane guides so the camera-112 view stays uncluttered.
+    lane_label_baseline = round(frame.shape[0] * 0.644)
+    lane_label_font = cv2.FONT_HERSHEY_SIMPLEX
+    lane_label_scale = 0.38
     for lane_name, polygon in (lane_points or {}).items():
         summary = (lane_signals or {}).get(lane_name, {})
         direction = str(summary.get("direction", "unknown"))
-        source = str(summary.get("source", "none"))
         # BGR colours: green=up, red=down, yellow=no readable light.
         color = {"up": (0, 200, 0), "down": (0, 0, 220)}.get(direction, (0, 220, 220))
         cv2.polylines(frame, [polygon], isClosed=True, color=color, thickness=2, lineType=cv2.LINE_AA)
-        moments = cv2.moments(polygon)
-        if moments["m00"]:
-            anchor = (int(moments["m10"] / moments["m00"]), int(moments["m01"] / moments["m00"]))
+        span = horizontal_polygon_span(polygon, lane_label_baseline)
+        if span:
+            label = f"{lane_name.replace('_', ' ')} {direction}"
+            (label_width, _label_height), _baseline = cv2.getTextSize(
+                label, lane_label_font, lane_label_scale, 1
+            )
+            label_x = round((span[0] + span[1] - label_width) / 2)
             cv2.putText(
                 frame,
-                f"{lane_name.replace('_', ' ')} {direction} ({source})",
-                (max(2, anchor[0] - 36), max(18, anchor[1])),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.38,
+                label,
+                (max(2, label_x), lane_label_baseline),
+                lane_label_font,
+                lane_label_scale,
                 color,
                 1,
                 cv2.LINE_AA,
@@ -700,6 +748,7 @@ def grouped_detection(
     label_overrides: dict[int, str] | None = None,
     retained_tracks: list[dict[str, object]] | None = None,
     lane_points: dict[str, np.ndarray] | None = None,
+    require_lane_membership: bool = True,
     direction_by_track: dict[int, str] | None = None,
     allowed_by_lane: dict[str, str] | None = None,
 ) -> dict[str, list[dict]]:
@@ -725,25 +774,35 @@ def grouped_detection(
         ids = boxes.id.int().cpu().tolist() if include_track_id and boxes.id is not None else [None] * len(boxes)
         for box, track_id in zip(boxes, ids):
             class_id = int(box.cls.item())
-            if class_id not in class_map or not box_is_inside_roi(box, roi_points):
+            if (
+                class_id not in class_map
+                or not box_is_inside_roi(box, roi_points)
+                or (require_lane_membership and not box_is_inside_lanes(box, lane_points))
+            ):
                 continue
             output_name = label_overrides.get(track_id, class_aliases.get(class_map[class_id], class_map[class_id]))
             xyxy = [round(float(value), 2) for value in box.xyxy[0].cpu().tolist()]
             bottom_center = [round((xyxy[0] + xyxy[2]) / 2, 2), round(xyxy[3], 2)]
-            grouped[output_name].append(
-                {
-                    "class_id": class_id,
-                    "track_id": track_id,
-                    "confidence": round(float(box.conf.item()), 4),
-                    "bbox_xyxy": xyxy,
-                    "bottom_center": bottom_center,
-                    "occluded_prediction": False,
-                    **movement_fields(bottom_center, track_id),
-                }
-            )
+            detection = {
+                "class_id": class_id,
+                "confidence": round(float(box.conf.item()), 4),
+                "bbox_xyxy": xyxy,
+                "bottom_center": bottom_center,
+                "occluded_prediction": False,
+                **movement_fields(bottom_center, track_id),
+            }
+            if include_track_id:
+                detection["track_id"] = track_id
+            grouped[output_name].append(detection)
     for track in retained_tracks or []:
         xyxy = [round(float(value), 2) for value in track["bbox_xyxy"]]
         bottom_center = [round((xyxy[0] + xyxy[2]) / 2, 2), round(xyxy[3], 2)]
+        if (
+            require_lane_membership
+            and lane_points
+            and point_lane((bottom_center[0], bottom_center[1]), lane_points) is None
+        ):
+            continue
         track_id = track["track_id"]
         grouped[str(track["label"])].append(
             {
@@ -757,6 +816,27 @@ def grouped_detection(
             }
         )
     return grouped
+
+
+def detections_grouped_by_lane(
+    detections_by_class: dict[str, list[dict]],
+) -> dict[str, list[dict]]:
+    """Present raw detections by their lane after the large-ROI scan.
+
+    ``outside_lane`` is intentional: it preserves a valid detection in the
+    scan area whose bottom-centre is on a divider or outside the four lane
+    polygons, instead of silently deleting it.
+    """
+    by_lane: dict[str, list[dict]] = {
+        **{f"lane_{index}": [] for index in range(1, 5)},
+        "outside_lane": [],
+    }
+    for class_name, detections in detections_by_class.items():
+        for detection in detections:
+            item = {"class_name": class_name, **detection}
+            lane_id = str(detection.get("lane_id") or "outside_lane")
+            by_lane.setdefault(lane_id, []).append(item)
+    return by_lane
 
 
 def apply_class_aliases(model: YOLO, class_aliases: dict[str, str]) -> None:
@@ -784,9 +864,12 @@ def annotated_frame(
     retained_tracks: list[dict[str, object]] | None = None,
     lane_points: dict[str, np.ndarray] | None = None,
     lane_signals: dict[str, dict[str, object]] | None = None,
+    lane_filter_points: dict[str, np.ndarray] | None = None,
+    require_lane_membership: bool = True,
+    source_frame: np.ndarray | None = None,
 ) -> object:
     """Render boxes with stable class colors and labels without confidence text."""
-    frame = result.orig_img.copy()
+    frame = (source_frame if source_frame is not None else result.orig_img).copy()
     if roi_points is not None:
         draw_bridge_guides(frame, roi_points, show_gates, lane_points, lane_signals)
     boxes = result.boxes
@@ -813,7 +896,11 @@ def annotated_frame(
         ids = boxes.id.int().cpu().tolist() if boxes.id is not None else [None] * len(boxes)
         for box, track_id in zip(boxes, ids):
             class_id = int(box.cls.item())
-            if class_id not in class_map or not box_is_inside_roi(box, roi_points):
+            if (
+                class_id not in class_map
+                or not box_is_inside_roi(box, roi_points)
+                or (require_lane_membership and not box_is_inside_lanes(box, lane_filter_points))
+            ):
                 continue
             original_name = class_map[class_id]
             output_name = label_overrides.get(track_id, class_aliases.get(original_name, original_name))
@@ -903,7 +990,8 @@ def run_image(
     )
     result = results[0]
     roi_points = bridge_roi(result.orig_img, profile) if bridge_only else None
-    lane_points = lane_rois(result.orig_img, profile) if show_lanes else None
+    lane_filter_points = lane_rois(result.orig_img, profile)
+    lane_points = lane_filter_points if show_lanes else None
     states_147: dict[str, str] = {}
     states_156: dict[str, str] = {}
     roi_states_147: dict[str, dict[str, str]] = {}
@@ -929,7 +1017,7 @@ def run_image(
         class_map,
         class_aliases=class_aliases,
         roi_points=roi_points,
-        lane_points=lane_points,
+        lane_points=lane_filter_points,
         allowed_by_lane=allowed_by_lane,
     )
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -944,6 +1032,7 @@ def run_image(
             show_gates,
             lane_points=lane_points,
             lane_signals=lane_signals,
+            lane_filter_points=lane_filter_points,
         ),
     )
     payload = {
@@ -1039,7 +1128,8 @@ def run_video(
             for frame_number, result in enumerate(results):
                 elapsed_seconds = frame_number / fps
                 roi_points = bridge_roi(result.orig_img, profile) if bridge_only else None
-                lane_points = lane_rois(result.orig_img, profile) if show_lanes else None
+                lane_filter_points = lane_rois(result.orig_img, profile)
+                lane_points = lane_filter_points if show_lanes else None
                 roi_states_147 = reader_147.states_at(elapsed_seconds) if reader_147 else {}
                 roi_states_156 = reader_156.states_at(elapsed_seconds) if reader_156 else {}
                 raw_147, selected_147 = resolve_signal_roi_states(roi_states_147) if roi_states_147 else ({}, {})
@@ -1053,6 +1143,7 @@ def run_video(
                     class_map,
                     class_aliases,
                     roi_points,
+                    lane_filter_points,
                     track_memory,
                     frame_number,
                     occlusion_hold,
@@ -1078,6 +1169,7 @@ def run_video(
                         retained_tracks,
                         lane_points,
                         lane_signals,
+                        lane_filter_points=lane_filter_points,
                     )
                 )
                 grouped = grouped_detection(
@@ -1088,7 +1180,7 @@ def run_video(
                     roi_points=roi_points,
                     label_overrides=label_overrides,
                     retained_tracks=retained_tracks,
-                    lane_points=lane_points,
+                    lane_points=lane_filter_points,
                     direction_by_track=direction_by_track,
                     allowed_by_lane=allowed_by_lane,
                 )
@@ -1116,6 +1208,147 @@ def run_video(
         if reader_156:
             reader_156.close()
     print(f"Track records: {jsonl_path}")
+    print(f"Annotated video: {video_path}")
+    if save_signal_views:
+        if signal147_source:
+            signal_video, signal_jsonl = render_signal_view(signal147_source, output_dir, "147")
+            print(f"Camera 147 light view: {signal_video}")
+            print(f"Camera 147 light records: {signal_jsonl}")
+        if signal156_source:
+            signal_video, signal_jsonl = render_signal_view(signal156_source, output_dir, "156")
+            print(f"Camera 156 light view: {signal_video}")
+            print(f"Camera 156 light records: {signal_jsonl}")
+
+
+def run_raw_video(
+    model: YOLO,
+    class_map: dict[int, str],
+    source: Path,
+    output_dir: Path,
+    conf: float,
+    imgsz: int,
+    class_aliases: dict[str, str],
+    bridge_only: bool,
+    show_gates: bool,
+    agnostic_nms: bool,
+    iou: float,
+    profile: str,
+    show_lanes: bool,
+    signal147_source: Path | None,
+    signal147_offset: float,
+    signal156_source: Path | None,
+    signal156_offset: float,
+    save_signal_views: bool,
+) -> None:
+    """Run raw YOLO on the full camera-112 scan ROI, then assign lane IDs."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    apply_class_aliases(model, class_aliases)
+    video_path = output_dir / f"{source.stem}_raw.mp4"
+    jsonl_path = output_dir / f"{source.stem}_raw_detections.jsonl"
+    capture = cv2.VideoCapture(str(source))
+    if not capture.isOpened():
+        raise SystemExit(f"Could not open video: {source}")
+    width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = capture.get(cv2.CAP_PROP_FPS) or 25.0
+    total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+    writer = cv2.VideoWriter(
+        str(video_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height)
+    )
+    if not writer.isOpened():
+        capture.release()
+        raise SystemExit(f"Could not create video output: {video_path}")
+    reader_147 = SignalVideoReader(signal147_source, "147", signal147_offset) if signal147_source else None
+    reader_156 = SignalVideoReader(signal156_source, "156", signal156_offset) if signal156_source else None
+    smoother_147 = SignalStateSmoother()
+    smoother_156 = SignalStateSmoother()
+    try:
+        with jsonl_path.open("w", encoding="utf-8") as handle:
+            frame_number = 0
+            while True:
+                ok, frame = capture.read()
+                if not ok:
+                    break
+                elapsed_seconds = frame_number / fps
+                lane_filter_points = lane_rois(frame, profile)
+                lane_points = lane_filter_points if show_lanes else None
+                roi_points = bridge_roi(frame, profile) if bridge_only else None
+
+                # YOLO sees the complete user-defined scan area.  Lane polygons
+                # are not used as a detection mask; they assign ``lane_id`` only
+                # after a box has been found.  The original frame is restored for
+                # the visual output.
+                result = model.predict(
+                    source=mask_outside_roi(frame, roi_points),
+                    classes=list(class_map),
+                    conf=conf,
+                    iou=iou,
+                    imgsz=imgsz,
+                    agnostic_nms=agnostic_nms,
+                    verbose=False,
+                )[0]
+
+                roi_states_147 = reader_147.states_at(elapsed_seconds) if reader_147 else {}
+                roi_states_156 = reader_156.states_at(elapsed_seconds) if reader_156 else {}
+                raw_147, selected_147 = resolve_signal_roi_states(roi_states_147) if roi_states_147 else ({}, {})
+                raw_156, selected_156 = resolve_signal_roi_states(roi_states_156) if roi_states_156 else ({}, {})
+                states_147 = smoother_147.update(raw_147) if raw_147 else {}
+                states_156 = smoother_156.update(raw_156) if raw_156 else {}
+                lane_signals = fuse_lane_signals(states_147, states_156)
+                allowed_by_lane = {lane: str(summary["direction"]) for lane, summary in lane_signals.items()}
+
+                writer.write(
+                    annotated_frame(
+                        result,
+                        class_map,
+                        class_aliases,
+                        roi_points,
+                        show_gates,
+                        lane_points=lane_points,
+                        lane_signals=lane_signals,
+                        lane_filter_points=lane_filter_points,
+                        require_lane_membership=False,
+                        source_frame=frame,
+                    )
+                )
+                detections = grouped_detection(
+                    result,
+                    class_map,
+                    class_aliases=class_aliases,
+                    roi_points=roi_points,
+                    lane_points=lane_filter_points,
+                    require_lane_membership=False,
+                    allowed_by_lane=allowed_by_lane,
+                )
+                detections_by_lane = detections_grouped_by_lane(detections)
+                record = {
+                    "frame": frame_number,
+                    "time_seconds": round(elapsed_seconds, 3),
+                    "mode": "raw_yolo_scan_roi_then_lane_assignment",
+                    "camera_profile": profile,
+                    "signal_147_roi_states": roi_states_147,
+                    "signal_147_states": states_147,
+                    "signal_147_selected_light_source": selected_147,
+                    "signal_156_roi_states": roi_states_156,
+                    "signal_156_states": states_156,
+                    "signal_156_selected_light_source": selected_156,
+                    "lane_signal_fusion": lane_signals,
+                    "lane_directions": allowed_by_lane,
+                    "detections_by_class": detections,
+                    "detections_by_lane": detections_by_lane,
+                }
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+                frame_number += 1
+                if frame_number % 100 == 0:
+                    print(f"Processed {frame_number}/{total_frames} frames", flush=True)
+    finally:
+        capture.release()
+        writer.release()
+        if reader_147:
+            reader_147.close()
+        if reader_156:
+            reader_156.close()
+    print(f"Raw detection records: {jsonl_path}")
     print(f"Annotated video: {video_path}")
     if save_signal_views:
         if signal147_source:
@@ -1203,29 +1436,51 @@ def main() -> None:
             args.signal156_offset,
         )
     else:
-        run_video(
-            model,
-            class_map,
-            args.source,
-            args.output_dir,
-            args.conf,
-            args.imgsz,
-            args.tracker,
-            class_aliases,
-            args.bridge_only,
-            show_gates,
-            args.agnostic_nms,
-            args.occlusion_hold,
-            args.iou,
-            args.max_held_tracks,
-            profile,
-            show_lanes,
-            signal147_source,
-            args.signal_offset,
-            signal156_source,
-            args.signal156_offset,
-            save_signal_views,
-        )
+        if args.raw:
+            run_raw_video(
+                model,
+                class_map,
+                args.source,
+                args.output_dir,
+                args.conf,
+                args.imgsz,
+                class_aliases,
+                args.bridge_only,
+                show_gates,
+                args.agnostic_nms,
+                args.iou,
+                profile,
+                show_lanes,
+                signal147_source,
+                args.signal_offset,
+                signal156_source,
+                args.signal156_offset,
+                save_signal_views,
+            )
+        else:
+            run_video(
+                model,
+                class_map,
+                args.source,
+                args.output_dir,
+                args.conf,
+                args.imgsz,
+                args.tracker,
+                class_aliases,
+                args.bridge_only,
+                show_gates,
+                args.agnostic_nms,
+                args.occlusion_hold,
+                args.iou,
+                args.max_held_tracks,
+                profile,
+                show_lanes,
+                signal147_source,
+                args.signal_offset,
+                signal156_source,
+                args.signal156_offset,
+                save_signal_views,
+            )
 
 
 if __name__ == "__main__":

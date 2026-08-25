@@ -57,6 +57,30 @@ python3 vehicle_tracking.py \
 ระบบจะสร้างวิดีโออธิบายไฟของกล้อง 147 และ 156 เพิ่มให้
 โดยอัตโนมัติด้วย
 
+### Raw detection ในเขตสแกน แล้วค่อยแยกเลน
+
+เพิ่ม `--raw` เพื่อใช้ YOLO แบบเฟรมต่อเฟรมโดยไม่สร้าง ByteTrack ID ระบบจะ
+ปิดภาพนอก ROI สแกนใหญ่ของกล้อง 112 ก่อนส่งให้โมเดล จากนั้นใช้จุดกึ่งกลางล่าง
+ของรถกำหนด `lane_id` ว่าอยู่ `lane_1` ถึง `lane_4` ใด ข้อมูล JSONL มีทั้ง
+`detections_by_class` และ `detections_by_lane` หากรถยังไม่ตกในกรอบเลนใด จะอยู่
+ใน `outside_lane` แทนการถูกตัดทิ้ง ใช้โมเดลรถไทยได้ดังนี้:
+
+```bash
+python3 vehicle_tracking.py \
+  --raw \
+  --source locations/krung_thon_bridge/v3/krung_thon_bridge_cam112_v3_1min.mp4 \
+  --signal-source locations/krung_thon_bridge/v3/krung_thon_bridge_cam147_v3_1min.mp4 \
+  --signal156-source locations/krung_thon_bridge/v3/krung_thon_bridge_cam156_v3_1min.mp4 \
+  --model model/thai_cars_gpu/weights/best.pt \
+  --output-dir runs/krung_thon_bridge/v3_raw_scan_roi \
+  --profile krung_thon_bridge \
+  --imgsz 640 \
+  --conf 0.20
+```
+
+ไฟล์หลักจะลงท้าย `_raw.mp4` และข้อมูลต่อเฟรมจะอยู่ใน `_raw_detections.jsonl`
+โดยไม่มี `track_id`.
+
 ถ้าสีไฟอ่านไม่ได้จากเฟรมใด ระบบจะให้สถานะ `unknown` และจะไม่ตัดสินว่าเป็นรถสวนทาง
 เพื่อหลีกเลี่ยงการแจ้งเตือนผิดจากภาพไฟขนาดเล็กหรือภาพเบลอ
 
