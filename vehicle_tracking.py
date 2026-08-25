@@ -13,7 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 from collections import Counter, defaultdict, deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 # pyrefly: ignore [missing-import]
@@ -134,6 +134,15 @@ def parse_args() -> argparse.Namespace:
         "--raw",
         action="store_true",
         help="Run raw per-frame detection only; do not create or retain ByteTrack IDs",
+    )
+    parser.add_argument(
+        "--wrong-way-alerts",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "For tracked Krung Thon video, draw normal vehicle boxes green and "
+            "wrong-way vehicles red (default: enabled for the Krung Thon profile)"
+        ),
     )
     parser.add_argument(
         "--iou",
@@ -493,6 +502,51 @@ class TrackState:
     last_seen_frame: int
     observations: int
     confidence: float
+    vertical_motion: deque[float] = field(default_factory=lambda: deque(maxlen=10))
+
+
+def track_directions(track_memory: dict[int, TrackState]) -> dict[int, str]:
+    """Classify the recent vertical motion of confirmed ByteTrack objects.
+
+    Image ``y`` gets smaller when a vehicle travels up the bridge, and grows
+    when it travels down toward the camera.  Summing a short motion window
+    avoids marking a stationary vehicle wrong-way when its detection box
+    jitters by a pixel or two.
+    """
+    directions: dict[int, str] = {}
+    for track_id, state in track_memory.items():
+        if state.observations < 4 or len(state.vertical_motion) < 3:
+            continue
+        movement_y = sum(state.vertical_motion)
+        if movement_y <= -3.0:
+            directions[track_id] = "up"
+        elif movement_y >= 3.0:
+            directions[track_id] = "down"
+        else:
+            directions[track_id] = "unknown"
+    return directions
+
+
+def wrong_way_track_ids(
+    track_memory: dict[int, TrackState],
+    directions: dict[int, str],
+    lane_points: dict[str, np.ndarray] | None,
+    allowed_by_lane: dict[str, str],
+) -> set[int]:
+    """Return only tracks moving opposite to a readable lane direction."""
+    violations: set[int] = set()
+    if not lane_points:
+        return violations
+    for track_id, direction in directions.items():
+        state = track_memory.get(track_id)
+        if state is None:
+            continue
+        x1, _y1, x2, y2 = state.bbox_xyxy
+        lane_id = point_lane(((x1 + x2) / 2, y2), lane_points)
+        expected = allowed_by_lane.get(lane_id, "unknown") if lane_id else "unknown"
+        if direction in {"up", "down"} and expected in {"up", "down"} and direction != expected:
+            violations.add(track_id)
+    return violations
 
 
 def stabilized_tracks(
@@ -530,6 +584,7 @@ def stabilized_tracks(
                 memory[track_id] = state
             else:
                 state.velocity = (center[0] - state.center[0], center[1] - state.center[1])
+                state.vertical_motion.append(state.velocity[1])
                 state.bbox_xyxy = xyxy
                 state.center = center
                 state.last_seen_frame = frame_number
@@ -866,24 +921,32 @@ def annotated_frame(
     lane_signals: dict[str, dict[str, object]] | None = None,
     lane_filter_points: dict[str, np.ndarray] | None = None,
     require_lane_membership: bool = True,
+    alert_wrong_way: bool = False,
+    wrong_way_ids: set[int] | None = None,
     source_frame: np.ndarray | None = None,
 ) -> object:
-    """Render boxes with stable class colors and labels without confidence text."""
+    """Render boxes and optionally highlight tracked wrong-way vehicles."""
     frame = (source_frame if source_frame is not None else result.orig_img).copy()
     if roi_points is not None:
         draw_bridge_guides(frame, roi_points, show_gates, lane_points, lane_signals)
     boxes = result.boxes
     class_aliases = class_aliases or {}
     label_overrides = label_overrides or {}
+    wrong_way_ids = wrong_way_ids or set()
 
-    def draw_box(label: str, xyxy: list[float], occluded: bool = False) -> None:
-        color_name = "car" if label in {"car", "taxi"} else label
-        color = CLASS_COLORS_BGR.get(color_name, (255, 255, 255))
+    def draw_box(label: str, xyxy: list[float], occluded: bool = False, wrong_way: bool = False) -> None:
+        if alert_wrong_way:
+            color = (0, 0, 255) if wrong_way else (0, 220, 0)
+            display_label = label
+        else:
+            color_name = "car" if label in {"car", "taxi"} else label
+            color = CLASS_COLORS_BGR.get(color_name, (255, 255, 255))
+            display_label = f"{label} (hold)" if occluded else label
         x1, y1, x2, y2 = [int(round(value)) for value in xyxy]
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 1 if occluded else 2)
         cv2.putText(
             frame,
-            f"{label} (hold)" if occluded else label,
+            display_label,
             (x1, max(22, y1 - 8)),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.55 if occluded else 0.65,
@@ -904,9 +967,18 @@ def annotated_frame(
                 continue
             original_name = class_map[class_id]
             output_name = label_overrides.get(track_id, class_aliases.get(original_name, original_name))
-            draw_box(output_name, [float(value) for value in box.xyxy[0].cpu().tolist()])
+            draw_box(
+                output_name,
+                [float(value) for value in box.xyxy[0].cpu().tolist()],
+                wrong_way=track_id in wrong_way_ids,
+            )
     for track in retained_tracks or []:
-        draw_box(str(track["label"]), list(track["bbox_xyxy"]), occluded=True)
+        draw_box(
+            str(track["label"]),
+            list(track["bbox_xyxy"]),
+            occluded=True,
+            wrong_way=track["track_id"] in wrong_way_ids,
+        )
     return frame
 
 
@@ -1084,6 +1156,7 @@ def run_video(
     signal156_source: Path | None,
     signal156_offset: float,
     save_signal_views: bool,
+    alert_wrong_way: bool,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     apply_class_aliases(model, class_aliases)
@@ -1149,15 +1222,13 @@ def run_video(
                     occlusion_hold,
                     max_held_tracks,
                 )
-                direction_by_track = {
-                    track_id: (
-                        "up" if state.velocity[1] < -0.8 else
-                        "down" if state.velocity[1] > 0.8 else
-                        "unknown"
-                    )
-                    for track_id, state in track_memory.items()
-                    if state.observations >= 3
-                }
+                direction_by_track = track_directions(track_memory)
+                violations = wrong_way_track_ids(
+                    track_memory,
+                    direction_by_track,
+                    lane_filter_points,
+                    allowed_by_lane,
+                )
                 writer.write(
                     annotated_frame(
                         result,
@@ -1170,6 +1241,8 @@ def run_video(
                         lane_points,
                         lane_signals,
                         lane_filter_points=lane_filter_points,
+                        alert_wrong_way=alert_wrong_way,
+                        wrong_way_ids=violations,
                     )
                 )
                 grouped = grouped_detection(
@@ -1196,6 +1269,7 @@ def run_video(
                     "signal_156_selected_light_source": selected_156,
                     "lane_signal_fusion": lane_signals,
                     "lane_directions": allowed_by_lane,
+                    "wrong_way_track_ids": sorted(violations),
                     "tracks_by_class": grouped,
                 }
                 handle.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -1373,6 +1447,9 @@ def main() -> None:
     if signal156_source and not signal156_source.exists():
         raise SystemExit(f"Camera 156 signal source not found: {signal156_source}")
     show_lanes = args.show_lanes if args.show_lanes is not None else profile == PROFILE_KRUNG_THON
+    wrong_way_alerts = args.wrong_way_alerts if args.wrong_way_alerts is not None else (
+        profile == PROFILE_KRUNG_THON
+    )
     save_signal_views = args.save_signal_views if args.save_signal_views is not None else (
         profile == PROFILE_KRUNG_THON and bool(signal147_source or signal156_source)
     )
@@ -1480,6 +1557,7 @@ def main() -> None:
                 signal156_source,
                 args.signal156_offset,
                 save_signal_views,
+                wrong_way_alerts,
             )
 
 
