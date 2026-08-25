@@ -4,15 +4,15 @@ COCO classes used by this project:
     2 car, 3 motorcycle, 5 bus, 7 truck
 
 Examples:
-    python vehicle_tracking.py --source locations/taksin/image/image.png
-    python vehicle_tracking.py --source locations/taksin/video/taksin_bridge_sathorn_1min.mp4
+    python3 vehicle_tracking.py --source locations/taksin/image/image.png
+    python3 vehicle_tracking.py --source locations/taksin/video/taksin_bridge_sathorn_1min.mp4
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-from collections import defaultdict
+from collections import Counter, defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -22,6 +22,14 @@ import cv2
 import numpy as np
 # pyrefly: ignore [missing-import]
 from ultralytics import YOLO
+
+from config.krung_thon_bridge_regions import (
+    camera_112_lane_rois,
+    camera_112_roi,
+    camera_147_signal_rois,
+    camera_156_signal_rois,
+    point_lane,
+)
 
 
 VEHICLE_NAMES = {
@@ -68,6 +76,10 @@ BRIDGE_ROI_NORMALIZED = (
 GATE_A_NORMALIZED = (0.576, 0.297)
 GATE_B_NORMALIZED = (0.394, 0.771)
 
+PROFILE_AUTO = "auto"
+PROFILE_TAKSIN = "taksin"
+PROFILE_KRUNG_THON = "krung_thon_bridge"
+
 
 def vehicle_class_map(model: YOLO, selected_names: set[str] | None = None) -> dict[int, str]:
     """Match either COCO weights or the project's four-class checkpoint.
@@ -87,6 +99,36 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--source", type=Path, required=True, help="Input image or video")
     parser.add_argument("--output-dir", type=Path, default=Path("runs/vehicles"))
     parser.add_argument("--model", default="model/coco/yolo11m.pt", help="Ultralytics model or local .pt path")
+    parser.add_argument(
+        "--profile",
+        choices=(PROFILE_AUTO, PROFILE_TAKSIN, PROFILE_KRUNG_THON),
+        default=PROFILE_AUTO,
+        help="Camera geometry profile; auto selects Krung Thon for its source folder",
+    )
+    parser.add_argument(
+        "--signal-source",
+        type=Path,
+        default=None,
+        help="Camera 147 video used to read lane signal colors for a camera 112 run",
+    )
+    parser.add_argument(
+        "--signal-offset",
+        type=float,
+        default=0.0,
+        help="Seconds added to camera 112 time when sampling camera 147 (default: 0)",
+    )
+    parser.add_argument(
+        "--signal156-source",
+        type=Path,
+        default=None,
+        help="Camera 156 video used as the opposite-side signal confirmation",
+    )
+    parser.add_argument(
+        "--signal156-offset",
+        type=float,
+        default=0.0,
+        help="Seconds added to camera 112 time when sampling camera 156 (default: 0)",
+    )
     parser.add_argument("--conf", type=float, default=0.16)
     parser.add_argument(
         "--iou",
@@ -124,6 +166,18 @@ def parse_args() -> argparse.Namespace:
         help="Draw Gate A/B guide lines (default: enabled)",
     )
     parser.add_argument(
+        "--show-lanes",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Draw the four Krung Thon lane polygons (default: enabled for that profile)",
+    )
+    parser.add_argument(
+        "--save-signal-views",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Write annotated camera 147 and 156 light videos (default: enabled for Krung Thon)",
+    )
+    parser.add_argument(
         "--agnostic-nms",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -144,13 +198,211 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def bridge_roi(frame) -> np.ndarray:
-    """Return the bridge-road trapezoid at the current frame resolution."""
+def resolve_profile(source: Path, requested: str) -> str:
+    """Resolve the camera geometry without changing existing Taksin commands."""
+    if requested != PROFILE_AUTO:
+        return requested
+    return PROFILE_KRUNG_THON if "krung_thon_bridge" in str(source) else PROFILE_TAKSIN
+
+
+def default_signal_source(source: Path, profile: str) -> Path | None:
+    """Find the matching camera 147 file for a camera 112 source when available."""
+    if profile != PROFILE_KRUNG_THON or "cam112" not in source.name:
+        return None
+    candidate = source.with_name(source.name.replace("cam112", "cam147"))
+    return candidate if candidate.exists() else None
+
+
+def default_signal156_source(source: Path, profile: str) -> Path | None:
+    """Find camera 156 alongside a camera 112 v2 video when it is available."""
+    if profile != PROFILE_KRUNG_THON or "cam112" not in source.name:
+        return None
+    candidate = source.with_name(source.name.replace("cam112", "cam156"))
+    return candidate if candidate.exists() else None
+
+
+def bridge_roi(frame, profile: str = PROFILE_TAKSIN) -> np.ndarray:
+    """Return the selected bridge-road ROI at the current frame resolution."""
+    if profile == PROFILE_KRUNG_THON:
+        return camera_112_roi(frame)
     height, width = frame.shape[:2]
     return np.array(
         [(round(x * width), round(y * height)) for x, y in BRIDGE_ROI_NORMALIZED],
         dtype=np.int32,
     )
+
+
+def lane_rois(frame, profile: str) -> dict[str, np.ndarray] | None:
+    if profile != PROFILE_KRUNG_THON:
+        return None
+    return camera_112_lane_rois(frame)
+
+
+def direction_from_signal(camera: str, signal_state: str) -> str:
+    """Translate a signal LED colour to the travel direction in camera 112.
+
+    Camera 147 faces the same direction as camera 112: green means ``up`` and
+    red means ``down``.  Camera 156 sees the opposite end of the reversible
+    lane, so its physical LED meaning is inverted: red means ``up`` and green
+    means ``down``.  Its regions are already keyed to the matching camera 112
+    lane in ``krung_thon_bridge_regions.py``.
+    """
+    if signal_state not in {"green", "red"}:
+        return "unknown"
+    if camera == "156":
+        return "down" if signal_state == "green" else "up"
+    return "up" if signal_state == "green" else "down"
+
+
+def allowed_direction(signal_state: str) -> str:
+    """Backward-compatible camera 147 direction mapping."""
+    return direction_from_signal("147", signal_state)
+
+
+def fuse_lane_signals(
+    states_147: dict[str, str] | None,
+    states_156: dict[str, str] | None,
+) -> dict[str, dict[str, object]]:
+    """Fuse the two signal cameras into one complete direction per lane.
+
+    A readable state from either camera is enough.  When both provide the same
+    direction the result is marked ``both``.  A true disagreement stays
+    visible as ``conflict_147_priority`` but still yields a deterministic
+    direction for camera 112; camera 147 is the priority because its signal
+    boards occupy more pixels in this dataset.
+    """
+    states_147 = states_147 or {}
+    states_156 = states_156 or {}
+    fused: dict[str, dict[str, object]] = {}
+    for index in range(1, 5):
+        lane = f"lane_{index}"
+        light_147 = states_147.get(lane, "unknown")
+        light_156 = states_156.get(lane, "unknown")
+        direction_147 = direction_from_signal("147", light_147)
+        direction_156 = direction_from_signal("156", light_156)
+        known_147 = direction_147 != "unknown"
+        known_156 = direction_156 != "unknown"
+        if known_147 and known_156 and direction_147 == direction_156:
+            final_direction, source, agrees = direction_147, "both", True
+        elif known_147 and known_156:
+            final_direction, source, agrees = direction_147, "conflict_147_priority", False
+        elif known_147:
+            final_direction, source, agrees = direction_147, "147", None
+        elif known_156:
+            final_direction, source, agrees = direction_156, "156", None
+        else:
+            final_direction, source, agrees = "unknown", "none", None
+        fused[lane] = {
+            "light_147": light_147,
+            "light_156": light_156,
+            "direction_147": direction_147,
+            "direction_156": direction_156,
+            "direction": final_direction,
+            "source": source,
+            "agrees": agrees,
+        }
+    return fused
+
+
+def classify_signal_state(frame: np.ndarray, polygon: np.ndarray) -> str:
+    """Classify a small overhead signal as green, red, or unknown.
+
+    The signal ROIs are only a few pixels high.  We therefore require a small
+    aggregate colored region instead of trusting the average color, which
+    would mistake the bridge structure and sky for a signal.
+    """
+    mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+    cv2.fillPoly(mask, [polygon.astype(np.int32)], 255)
+    # The top two rows are frequently a black-camera border or compression
+    # edge, not part of the LED display.
+    mask[:2] = 0
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    hue, saturation, value = cv2.split(hsv)
+    green = (
+        (hue >= 70)
+        & (hue <= 130)
+        & (saturation >= 40)
+        & (value >= 30)
+        & (mask > 0)
+    ).astype(np.uint8)
+    red = (
+        ((hue <= 20) | (hue >= 150))
+        & (saturation >= 40)
+        & (value >= 30)
+        & (mask > 0)
+    ).astype(np.uint8)
+
+    area = max(1, int((mask > 0).sum()))
+    # LED arrows are intentionally low-resolution and often appear as several
+    # disconnected pixels after H.264 compression.  Aggregate colored pixels
+    # rather than requiring one connected blob.
+    green_area = int(green.sum())
+    red_area = int(red.sum())
+    green_score = green_area / area
+    red_score = red_area / area
+    # Green boards occupy most of the display face.  Red X/arrow LEDs are
+    # dimmer and fragmented, so they use a lower but still conservative ratio.
+    if green_area >= 20 and green_score >= 0.50 and green_score > red_score * 1.25:
+        return "green"
+    if red_area >= 8 and red_score >= 0.03:
+        return "red"
+    return "unknown"
+
+
+class SignalStateSmoother:
+    """Suppress one-frame color glitches in the tiny camera 147 ROIs."""
+
+    def __init__(self, window: int = 7):
+        self.history: dict[str, deque[str]] = defaultdict(lambda: deque(maxlen=window))
+
+    def update(self, raw_states: dict[str, str]) -> dict[str, str]:
+        stable: dict[str, str] = {}
+        for lane, state in raw_states.items():
+            if state != "unknown":
+                self.history[lane].append(state)
+            values = list(self.history[lane])
+            stable[lane] = Counter(values).most_common(1)[0][0] if values else "unknown"
+        return stable
+
+
+class SignalVideoReader:
+    """Read one signal-camera stream by elapsed camera 112 time."""
+
+    def __init__(self, source: Path, camera: str, offset_seconds: float = 0.0):
+        self.source = source
+        self.camera = camera
+        self.offset_seconds = offset_seconds
+        self.capture = cv2.VideoCapture(str(source))
+        if not self.capture.isOpened():
+            raise SystemExit(f"Could not open signal video: {source}")
+        self.fps = self.capture.get(cv2.CAP_PROP_FPS) or 25.0
+        self.next_frame = 0
+        self.last_frame: np.ndarray | None = None
+
+    def states_at(self, elapsed_seconds: float) -> dict[str, str]:
+        target = max(0, round((elapsed_seconds + self.offset_seconds) * self.fps))
+        if target < self.next_frame:
+            self.capture.set(cv2.CAP_PROP_POS_FRAMES, target)
+            self.next_frame = target
+        while self.next_frame <= target:
+            ok, frame = self.capture.read()
+            if not ok:
+                break
+            self.last_frame = frame
+            self.next_frame += 1
+        if self.last_frame is None:
+            return {f"lane_{index}": "unknown" for index in range(1, 5)}
+        signal_rois = signal_rois_for_camera(self.last_frame, self.camera)
+        return {lane: classify_signal_state(self.last_frame, polygon) for lane, polygon in signal_rois.items()}
+
+    def close(self) -> None:
+        self.capture.release()
+
+
+def signal_rois_for_camera(frame: np.ndarray, camera: str) -> dict[str, np.ndarray]:
+    if camera == "156":
+        return camera_156_signal_rois(frame)
+    return camera_147_signal_rois(frame)
 
 
 def box_is_inside_roi(box, roi_points: np.ndarray | None) -> bool:
@@ -279,9 +531,82 @@ def gate_endpoints(roi_points: np.ndarray, y_normalized: float, frame_height: in
     return tuple(sorted(intersections))  # left, right
 
 
-def draw_bridge_guides(frame, roi_points: np.ndarray, show_gates: bool) -> None:
-    """Draw the bridge boundary and optionally the guide-only Gate A/B lines."""
+def draw_text_panel(
+    frame: np.ndarray,
+    lines: list[tuple[str, tuple[int, int, int]]],
+    corner: str,
+    font_scale: float = 0.43,
+    padding: int = 5,
+    margin: int = 6,
+) -> None:
+    """Draw a compact panel sized to its longest text line.
+
+    ``corner`` is deliberately limited to the two locations used by the three
+    camera outputs.  Text extents are measured with OpenCV before drawing, so
+    the dark panel ends just after the last letter rather than reserving a
+    fixed, scene-blocking rectangle.
+    """
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    metrics = [cv2.getTextSize(text, font, font_scale, 1) for text, _color in lines]
+    max_width = max(width for (width, _height), _baseline in metrics)
+    line_height = max(height + baseline for (_width, height), baseline in metrics)
+    panel_width = max_width + padding * 2
+    panel_height = line_height * len(lines) + padding * 2
+    frame_height, frame_width = frame.shape[:2]
+    x = frame_width - panel_width - margin if corner == "top_right" else margin
+    y = margin if corner == "top_right" else frame_height - panel_height - margin
+    x = max(0, x)
+    y = max(0, y)
+    cv2.rectangle(frame, (x, y), (x + panel_width, y + panel_height), (0, 0, 0), -1)
+    baseline_y = y + padding + metrics[0][0][1]
+    for (text, color), ((_, text_height), _baseline) in zip(lines, metrics):
+        cv2.putText(frame, text, (x + padding, baseline_y), font, font_scale, color, 1, cv2.LINE_AA)
+        baseline_y += line_height
+
+
+def draw_bridge_guides(
+    frame,
+    roi_points: np.ndarray,
+    show_gates: bool,
+    lane_points: dict[str, np.ndarray] | None = None,
+    lane_signals: dict[str, dict[str, object]] | None = None,
+) -> None:
+    """Draw the selected ROI, fused lane directions, and optional Taksin gates."""
     cv2.polylines(frame, [roi_points], isClosed=True, color=(0, 255, 0), thickness=3, lineType=cv2.LINE_AA)
+    for lane_name, polygon in (lane_points or {}).items():
+        summary = (lane_signals or {}).get(lane_name, {})
+        direction = str(summary.get("direction", "unknown"))
+        source = str(summary.get("source", "none"))
+        # BGR colours: green=up, red=down, yellow=no readable light.
+        color = {"up": (0, 200, 0), "down": (0, 0, 220)}.get(direction, (0, 220, 220))
+        cv2.polylines(frame, [polygon], isClosed=True, color=color, thickness=2, lineType=cv2.LINE_AA)
+        moments = cv2.moments(polygon)
+        if moments["m00"]:
+            anchor = (int(moments["m10"] / moments["m00"]), int(moments["m01"] / moments["m00"]))
+            cv2.putText(
+                frame,
+                f"{lane_name.replace('_', ' ')} {direction} ({source})",
+                (max(2, anchor[0] - 36), max(18, anchor[1])),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.38,
+                color,
+                1,
+                cv2.LINE_AA,
+            )
+    if lane_signals:
+        # A compact comparison panel keeps all raw light states readable even
+        # when the four lane polygons converge at the far end of the bridge.
+        panel_lines: list[tuple[str, tuple[int, int, int]]] = []
+        for index in range(1, 5):
+            lane = f"lane_{index}"
+            summary = lane_signals.get(lane, {})
+            direction = str(summary.get("direction", "unknown"))
+            light_147 = str(summary.get("light_147", "unknown"))[0].upper()
+            light_156 = str(summary.get("light_156", "unknown"))[0].upper()
+            source = str(summary.get("source", "none"))
+            color = {"up": (0, 220, 0), "down": (0, 0, 255)}.get(direction, (0, 220, 220))
+            panel_lines.append((f"L{index}: {direction} | 147:{light_147} 156:{light_156} | {source}", color))
+        draw_text_panel(frame, panel_lines, "top_right")
     if not show_gates:
         return
     gate_specs = (("GATE A", GATE_A_NORMALIZED, (255, 0, 0)), ("GATE B", GATE_B_NORMALIZED, (0, 0, 255)))
@@ -292,6 +617,26 @@ def draw_bridge_guides(frame, roi_points: np.ndarray, show_gates: bool) -> None:
         cv2.putText(frame, label, label_anchor, cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2, cv2.LINE_AA)
 
 
+def draw_signal_guides(
+    frame: np.ndarray,
+    camera: str,
+    signal_states: dict[str, str],
+) -> None:
+    """Draw a signal camera's four LED ROIs with their raw colours."""
+    rois = signal_rois_for_camera(frame, camera)
+    panel_lines: list[tuple[str, tuple[int, int, int]]] = [(f"CAMERA {camera} LIGHTS", (255, 255, 255))]
+    for index in range(1, 5):
+        lane = f"lane_{index}"
+        polygon = rois[lane]
+        light = signal_states.get(lane, "unknown")
+        direction = direction_from_signal(camera, light)
+        # green/red are the actual LED colours.  Yellow is only for unknown.
+        color = {"green": (0, 220, 0), "red": (0, 0, 255)}.get(light, (0, 220, 220))
+        cv2.polylines(frame, [polygon], True, color, 2, cv2.LINE_AA)
+        panel_lines.append((f"112 L{index}: light={light} -> {direction}", color))
+    draw_text_panel(frame, panel_lines, "bottom_left")
+
+
 def grouped_detection(
     result,
     class_map: dict[int, str],
@@ -300,11 +645,28 @@ def grouped_detection(
     roi_points: np.ndarray | None = None,
     label_overrides: dict[int, str] | None = None,
     retained_tracks: list[dict[str, object]] | None = None,
+    lane_points: dict[str, np.ndarray] | None = None,
+    direction_by_track: dict[int, str] | None = None,
+    allowed_by_lane: dict[str, str] | None = None,
 ) -> dict[str, list[dict]]:
     grouped: dict[str, list[dict]] = defaultdict(list)
     boxes = result.boxes
     class_aliases = class_aliases or {}
     label_overrides = label_overrides or {}
+    direction_by_track = direction_by_track or {}
+    allowed_by_lane = allowed_by_lane or {}
+
+    def movement_fields(bottom_center: list[float], track_id: int | None) -> dict[str, object]:
+        lane_id = point_lane((bottom_center[0], bottom_center[1]), lane_points) if lane_points else None
+        direction = direction_by_track.get(track_id) if track_id is not None else None
+        expected = allowed_by_lane.get(lane_id, "unknown") if lane_id else "unknown"
+        return {
+            "lane_id": lane_id,
+            "direction": direction or "unknown",
+            "expected_direction": expected,
+            "wrong_way": bool(direction and direction != "unknown" and expected != "unknown" and direction != expected),
+        }
+
     if boxes is not None:
         ids = boxes.id.int().cpu().tolist() if include_track_id and boxes.id is not None else [None] * len(boxes)
         for box, track_id in zip(boxes, ids):
@@ -313,26 +675,31 @@ def grouped_detection(
                 continue
             output_name = label_overrides.get(track_id, class_aliases.get(class_map[class_id], class_map[class_id]))
             xyxy = [round(float(value), 2) for value in box.xyxy[0].cpu().tolist()]
+            bottom_center = [round((xyxy[0] + xyxy[2]) / 2, 2), round(xyxy[3], 2)]
             grouped[output_name].append(
                 {
                     "class_id": class_id,
                     "track_id": track_id,
                     "confidence": round(float(box.conf.item()), 4),
                     "bbox_xyxy": xyxy,
-                    "bottom_center": [round((xyxy[0] + xyxy[2]) / 2, 2), round(xyxy[3], 2)],
+                    "bottom_center": bottom_center,
                     "occluded_prediction": False,
+                    **movement_fields(bottom_center, track_id),
                 }
             )
     for track in retained_tracks or []:
         xyxy = [round(float(value), 2) for value in track["bbox_xyxy"]]
+        bottom_center = [round((xyxy[0] + xyxy[2]) / 2, 2), round(xyxy[3], 2)]
+        track_id = track["track_id"]
         grouped[str(track["label"])].append(
             {
                 "class_id": None,
-                "track_id": track["track_id"],
+                "track_id": track_id,
                 "confidence": None,
                 "bbox_xyxy": xyxy,
-                "bottom_center": [round((xyxy[0] + xyxy[2]) / 2, 2), round(xyxy[3], 2)],
+                "bottom_center": bottom_center,
                 "occluded_prediction": True,
+                **movement_fields(bottom_center, track_id),
             }
         )
     return grouped
@@ -361,11 +728,13 @@ def annotated_frame(
     show_gates: bool = True,
     label_overrides: dict[int, str] | None = None,
     retained_tracks: list[dict[str, object]] | None = None,
+    lane_points: dict[str, np.ndarray] | None = None,
+    lane_signals: dict[str, dict[str, object]] | None = None,
 ) -> object:
     """Render boxes with stable class colors and labels without confidence text."""
     frame = result.orig_img.copy()
     if roi_points is not None:
-        draw_bridge_guides(frame, roi_points, show_gates)
+        draw_bridge_guides(frame, roi_points, show_gates, lane_points, lane_signals)
     boxes = result.boxes
     class_aliases = class_aliases or {}
     label_overrides = label_overrides or {}
@@ -400,6 +769,55 @@ def annotated_frame(
     return frame
 
 
+def render_signal_view(source: Path, output_dir: Path, camera: str) -> tuple[Path, Path]:
+    """Write an annotated signal-camera view and matching state JSONL."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    capture = cv2.VideoCapture(str(source))
+    if not capture.isOpened():
+        raise SystemExit(f"Could not open camera {camera} signal video: {source}")
+    width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = capture.get(cv2.CAP_PROP_FPS) or 25.0
+    video_path = output_dir / f"{source.stem}_lights_annotated.mp4"
+    jsonl_path = output_dir / f"{source.stem}_lights.jsonl"
+    writer = cv2.VideoWriter(str(video_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
+    if not writer.isOpened():
+        capture.release()
+        raise SystemExit(f"Could not create signal output: {video_path}")
+    smoother = SignalStateSmoother()
+    try:
+        with jsonl_path.open("w", encoding="utf-8") as handle:
+            frame_number = 0
+            while True:
+                ok, frame = capture.read()
+                if not ok:
+                    break
+                raw_states = {
+                    lane: classify_signal_state(frame, polygon)
+                    for lane, polygon in signal_rois_for_camera(frame, camera).items()
+                }
+                states = smoother.update(raw_states)
+                annotated = frame.copy()
+                draw_signal_guides(annotated, camera, states)
+                writer.write(annotated)
+                record = {
+                    "frame": frame_number,
+                    "time_seconds": round(frame_number / fps, 3),
+                    "camera": camera,
+                    "light_states": states,
+                    "directions_for_camera_112": {
+                        lane: direction_from_signal(camera, light)
+                        for lane, light in states.items()
+                    },
+                }
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+                frame_number += 1
+    finally:
+        capture.release()
+        writer.release()
+    return video_path, jsonl_path
+
+
 def run_image(
     model: YOLO,
     class_map: dict[int, str],
@@ -412,6 +830,12 @@ def run_image(
     show_gates: bool,
     agnostic_nms: bool,
     iou: float,
+    profile: str,
+    show_lanes: bool,
+    signal147_source: Path | None,
+    signal147_offset: float,
+    signal156_source: Path | None,
+    signal156_offset: float,
 ) -> None:
     apply_class_aliases(model, class_aliases)
     results = model.predict(
@@ -424,14 +848,46 @@ def run_image(
         verbose=False,
     )
     result = results[0]
-    roi_points = bridge_roi(result.orig_img) if bridge_only else None
-    grouped = grouped_detection(result, class_map, class_aliases=class_aliases, roi_points=roi_points)
+    roi_points = bridge_roi(result.orig_img, profile) if bridge_only else None
+    lane_points = lane_rois(result.orig_img, profile) if show_lanes else None
+    states_147: dict[str, str] = {}
+    states_156: dict[str, str] = {}
+    reader_147 = SignalVideoReader(signal147_source, "147", signal147_offset) if signal147_source else None
+    reader_156 = SignalVideoReader(signal156_source, "156", signal156_offset) if signal156_source else None
+    if reader_147:
+        states_147 = SignalStateSmoother().update(reader_147.states_at(0.0))
+        reader_147.close()
+    if reader_156:
+        states_156 = SignalStateSmoother().update(reader_156.states_at(0.0))
+        reader_156.close()
+    lane_signals = fuse_lane_signals(states_147, states_156)
+    allowed_by_lane = {lane: str(summary["direction"]) for lane, summary in lane_signals.items()}
+    grouped = grouped_detection(
+        result,
+        class_map,
+        class_aliases=class_aliases,
+        roi_points=roi_points,
+        lane_points=lane_points,
+        allowed_by_lane=allowed_by_lane,
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
     annotated_path = output_dir / f"{source.stem}_annotated.jpg"
-    cv2.imwrite(str(annotated_path), annotated_frame(result, class_map, class_aliases, roi_points, show_gates))
+    cv2.imwrite(
+        str(annotated_path),
+        annotated_frame(
+            result,
+            class_map,
+            class_aliases,
+            roi_points,
+            show_gates,
+            lane_points=lane_points,
+            lane_signals=lane_signals,
+        ),
+    )
     payload = {
         "source": str(source),
         "mode": "image_detection",
+        "camera_profile": profile,
         "classes": class_map,
         "class_aliases": class_aliases,
         "bridge_roi_normalized": BRIDGE_ROI_NORMALIZED if bridge_only else None,
@@ -440,6 +896,10 @@ def run_image(
         if bridge_only and show_gates
         else None,
         "detections_by_class": grouped,
+        "signal_147_states": states_147,
+        "signal_156_states": states_156,
+        "lane_signal_fusion": lane_signals,
+        "lane_direction_rule": "147: green=up/red=down; 156: green=down/red=up; unknown uses the other camera",
         "note": "A single image has detections but no temporal track IDs; use video mode for ByteTrack IDs.",
     }
     (output_dir / f"{source.stem}_detections.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -462,6 +922,13 @@ def run_video(
     occlusion_hold: int,
     iou: float,
     max_held_tracks: int,
+    profile: str,
+    show_lanes: bool,
+    signal147_source: Path | None,
+    signal147_offset: float,
+    signal156_source: Path | None,
+    signal156_offset: float,
+    save_signal_views: bool,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     apply_class_aliases(model, class_aliases)
@@ -483,6 +950,10 @@ def run_video(
     )
     if not writer.isOpened():
         raise SystemExit(f"Could not create video output: {video_path}")
+    reader_147 = SignalVideoReader(signal147_source, "147", signal147_offset) if signal147_source else None
+    reader_156 = SignalVideoReader(signal156_source, "156", signal156_offset) if signal156_source else None
+    smoother_147 = SignalStateSmoother()
+    smoother_156 = SignalStateSmoother()
     results = model.track(
         source=str(source),
         stream=True,
@@ -500,7 +971,15 @@ def run_video(
     try:
         with jsonl_path.open("w", encoding="utf-8") as handle:
             for frame_number, result in enumerate(results):
-                roi_points = bridge_roi(result.orig_img) if bridge_only else None
+                elapsed_seconds = frame_number / fps
+                roi_points = bridge_roi(result.orig_img, profile) if bridge_only else None
+                lane_points = lane_rois(result.orig_img, profile) if show_lanes else None
+                raw_147 = reader_147.states_at(elapsed_seconds) if reader_147 else {}
+                raw_156 = reader_156.states_at(elapsed_seconds) if reader_156 else {}
+                states_147 = smoother_147.update(raw_147) if raw_147 else {}
+                states_156 = smoother_156.update(raw_156) if raw_156 else {}
+                lane_signals = fuse_lane_signals(states_147, states_156)
+                allowed_by_lane = {lane: str(summary["direction"]) for lane, summary in lane_signals.items()}
                 label_overrides, retained_tracks = stabilized_tracks(
                     result,
                     class_map,
@@ -511,6 +990,15 @@ def run_video(
                     occlusion_hold,
                     max_held_tracks,
                 )
+                direction_by_track = {
+                    track_id: (
+                        "up" if state.velocity[1] < -0.8 else
+                        "down" if state.velocity[1] > 0.8 else
+                        "unknown"
+                    )
+                    for track_id, state in track_memory.items()
+                    if state.observations >= 3
+                }
                 writer.write(
                     annotated_frame(
                         result,
@@ -520,6 +1008,8 @@ def run_video(
                         show_gates,
                         label_overrides,
                         retained_tracks,
+                        lane_points,
+                        lane_signals,
                     )
                 )
                 grouped = grouped_detection(
@@ -530,21 +1020,60 @@ def run_video(
                     roi_points=roi_points,
                     label_overrides=label_overrides,
                     retained_tracks=retained_tracks,
+                    lane_points=lane_points,
+                    direction_by_track=direction_by_track,
+                    allowed_by_lane=allowed_by_lane,
                 )
-                record = {"frame": frame_number, "tracks_by_class": grouped}
+                record = {
+                    "frame": frame_number,
+                    "time_seconds": round(elapsed_seconds, 3),
+                    "camera_profile": profile,
+                    "signal_147_states": states_147,
+                    "signal_156_states": states_156,
+                    "lane_signal_fusion": lane_signals,
+                    "lane_directions": allowed_by_lane,
+                    "tracks_by_class": grouped,
+                }
                 handle.write(json.dumps(record, ensure_ascii=False) + "\n")
                 if (frame_number + 1) % 100 == 0:
                     print(f"Processed {frame_number + 1}/{total_frames} frames", flush=True)
     finally:
         writer.release()
+        if reader_147:
+            reader_147.close()
+        if reader_156:
+            reader_156.close()
     print(f"Track records: {jsonl_path}")
     print(f"Annotated video: {video_path}")
+    if save_signal_views:
+        if signal147_source:
+            signal_video, signal_jsonl = render_signal_view(signal147_source, output_dir, "147")
+            print(f"Camera 147 light view: {signal_video}")
+            print(f"Camera 147 light records: {signal_jsonl}")
+        if signal156_source:
+            signal_video, signal_jsonl = render_signal_view(signal156_source, output_dir, "156")
+            print(f"Camera 156 light view: {signal_video}")
+            print(f"Camera 156 light records: {signal_jsonl}")
 
 
 def main() -> None:
     args = parse_args()
     if not args.source.exists():
         raise SystemExit(f"Source not found: {args.source}")
+    profile = resolve_profile(args.source, args.profile)
+    signal147_source = args.signal_source or default_signal_source(args.source, profile)
+    signal156_source = args.signal156_source or default_signal156_source(args.source, profile)
+    if signal147_source and not signal147_source.exists():
+        raise SystemExit(f"Camera 147 signal source not found: {signal147_source}")
+    if signal156_source and not signal156_source.exists():
+        raise SystemExit(f"Camera 156 signal source not found: {signal156_source}")
+    show_lanes = args.show_lanes if args.show_lanes is not None else profile == PROFILE_KRUNG_THON
+    save_signal_views = args.save_signal_views if args.save_signal_views is not None else (
+        profile == PROFILE_KRUNG_THON and bool(signal147_source or signal156_source)
+    )
+    # Taksin's A/B gates are unrelated to the Krung Thon lane profile.  Keep
+    # the old default for Taksin, while Krung Thon starts with lane polygons.
+    show_gates = args.show_gates and profile != PROFILE_KRUNG_THON
     model = YOLO(args.model)
     requested_names = {name.strip().lower() for name in args.classes.split(",") if name.strip()} if args.classes else None
     class_map = vehicle_class_map(model, requested_names)
@@ -571,9 +1100,15 @@ def main() -> None:
                 args.imgsz,
                 class_aliases,
                 args.bridge_only,
-                args.show_gates,
+                show_gates,
                 args.agnostic_nms,
                 args.iou,
+                profile,
+                show_lanes,
+                signal147_source,
+                args.signal_offset,
+                signal156_source,
+                args.signal156_offset,
             )
     elif args.source.suffix.lower() in IMAGE_SUFFIXES:
         run_image(
@@ -585,9 +1120,15 @@ def main() -> None:
             args.imgsz,
             class_aliases,
             args.bridge_only,
-            args.show_gates,
+            show_gates,
             args.agnostic_nms,
             args.iou,
+            profile,
+            show_lanes,
+            signal147_source,
+            args.signal_offset,
+            signal156_source,
+            args.signal156_offset,
         )
     else:
         run_video(
@@ -600,11 +1141,18 @@ def main() -> None:
             args.tracker,
             class_aliases,
             args.bridge_only,
-            args.show_gates,
+            show_gates,
             args.agnostic_nms,
             args.occlusion_hold,
             args.iou,
             args.max_held_tracks,
+            profile,
+            show_lanes,
+            signal147_source,
+            args.signal_offset,
+            signal156_source,
+            args.signal156_offset,
+            save_signal_views,
         )
 
 
