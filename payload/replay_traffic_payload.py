@@ -60,13 +60,33 @@ def send_payload(sock: socket.socket, payload: dict[str, Any], host: str, port: 
         sock.sendto(encoded, (host, port))
 
 
+def find_latest_live_log() -> Path | None:
+    live_logs_dir = PROJECT_ROOT / "runs/live_logs"
+    if not live_logs_dir.is_dir():
+        return None
+    logs = sorted(
+        live_logs_dir.glob("**/*_camera112.jsonl"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    return logs[0] if logs else None
+
+
 def main() -> None:
     args = parse_args()
     input_path = args.input
+    latest_live = find_latest_live_log()
+
+    # If --input was not explicitly specified or points to default, prioritize latest live_logs
+    if args.input == DEFAULT_INPUT and latest_live:
+        input_path = latest_live
+
     if not input_path.is_absolute() and not input_path.is_file():
         project_relative = PROJECT_ROOT / input_path
         if project_relative.is_file():
             input_path = project_relative
+    if not input_path.is_file() and latest_live:
+        input_path = latest_live
     if not input_path.is_file():
         raise SystemExit(f"Input JSONL not found: {input_path}")
     if args.window_seconds <= 0:

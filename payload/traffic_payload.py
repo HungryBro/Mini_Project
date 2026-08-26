@@ -57,6 +57,7 @@ class TrafficWindowAggregator:
     site_name: str = "Krung Thon Bridge"
     camera_name: str = "Main traffic camera"
     anchor_time: datetime = field(default_factory=lambda: parse_start_time(None))
+    use_wall_clock: bool = False
 
     _window_start: float | None = field(default=None, init=False)
     _last_time: float | None = field(default=None, init=False)
@@ -70,25 +71,41 @@ class TrafficWindowAggregator:
 
     def add_frame(self, record: dict[str, Any]) -> list[dict[str, Any]]:
         """Add one raw tracker record and return any completed payloads."""
-        source_time = float(record.get("time_seconds", 0.0))
-        bucket_start = math.floor(source_time / self.window_seconds) * self.window_seconds
         completed: list[dict[str, Any]] = []
 
-        if self._window_start is None:
-            self._window_start = bucket_start
-        elif bucket_start != self._window_start:
-            payload = self.flush()
-            if payload:
-                completed.append(payload)
-            self._window_start = bucket_start
+        if self.use_wall_clock:
+            import time
+            current_time = time.time()
+            if self._window_start is None:
+                self._window_start = current_time
+            elif current_time - self._window_start >= self.window_seconds:
+                self._last_time = current_time
+                payload = self.flush()
+                if payload:
+                    completed.append(payload)
+                self._window_start = current_time
+            self._last_time = current_time
+        else:
+            source_time = float(record.get("time_seconds", 0.0))
+            bucket_start = math.floor(source_time / self.window_seconds) * self.window_seconds
 
-        self._last_time = source_time
+            if self._window_start is None:
+                self._window_start = bucket_start
+            elif bucket_start != self._window_start:
+                payload = self.flush()
+                if payload:
+                    completed.append(payload)
+                self._window_start = bucket_start
+
+            self._last_time = source_time
+
         self._samples += 1
         self._camera_profile = str(record.get("camera_profile", self._camera_profile))
         self._signals_147 = dict(record.get("signal_147_states") or {})
         self._signals_156 = dict(record.get("signal_156_states") or {})
         self._lanes = self._normalized_lanes(record.get("lane_signal_fusion") or {})
 
+        source_time_for_event = float(record.get("time_seconds", 0.0))
         for raw_type, vehicles in (record.get("tracks_by_class") or {}).items():
             vehicle_type = normalize_vehicle_type(raw_type)
             for vehicle in vehicles or []:
@@ -98,7 +115,7 @@ class TrafficWindowAggregator:
                 track_key = str(track_id)
                 self._vehicles[track_key] = vehicle_type
                 if bool(vehicle.get("wrong_way")):
-                    self._record_wrong_way(track_id, vehicle_type, vehicle, source_time)
+                    self._record_wrong_way(track_id, vehicle_type, vehicle, source_time_for_event)
 
         return completed
 
@@ -109,13 +126,30 @@ class TrafficWindowAggregator:
 
         window_end = self._last_time
         counts = Counter(self._vehicles.values())
+
+        if self.use_wall_clock:
+            now_dt = datetime.now(timezone.utc)
+            start_dt = datetime.fromtimestamp(self._window_start, tz=timezone.utc)
+            end_dt = datetime.fromtimestamp(window_end, tz=timezone.utc)
+            iso_start = start_dt.isoformat().replace("+00:00", "Z")
+            iso_end = end_dt.isoformat().replace("+00:00", "Z")
+            timestamp_str = now_dt.isoformat().replace("+00:00", "Z")
+            timestamp_unix = int(now_dt.timestamp())
+            elapsed_sec = round(window_end - self._window_start, 3)
+        else:
+            iso_start = iso_time(self.anchor_time, self._window_start)
+            iso_end = iso_time(self.anchor_time, window_end)
+            timestamp_str = iso_end
+            timestamp_unix = int((self.anchor_time + timedelta(seconds=window_end)).timestamp())
+            elapsed_sec = round(window_end - self._window_start, 3)
+
         payload = {
-            "timestamp": iso_time(self.anchor_time, window_end),
-            "timestamp_unix": int((self.anchor_time + timedelta(seconds=window_end)).timestamp()),
+            "timestamp": timestamp_str,
+            "timestamp_unix": timestamp_unix,
             "window": {
-                "start": iso_time(self.anchor_time, self._window_start),
-                "end": iso_time(self.anchor_time, window_end),
-                "seconds": round(window_end - self._window_start, 3),
+                "start": iso_start,
+                "end": iso_end,
+                "seconds": elapsed_sec,
                 "configured_seconds": self.window_seconds,
             },
             "location": {

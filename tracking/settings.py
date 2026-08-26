@@ -45,3 +45,10 @@ TIMESTAMP_156 = None
 
 # ไดเรกทอรีสำหรับบันทึกไฟล์ JSONL log
 LOG_DIRECTORY = PROJECT_DIRECTORY / "runs/live_logs"
+
+# ส่งข้อมูล UDP Payload อัตโนมัติระหว่างรัน Live Tracking
+ENABLE_UDP_PAYLOAD = True
+UDP_HOST = "127.0.0.1"
+UDP_PORT = 5005
+WINDOW_SECONDS = 30.0
+USE_WALL_CLOCK_TIME = True

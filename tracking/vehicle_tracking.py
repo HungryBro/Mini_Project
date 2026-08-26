@@ -26,13 +26,15 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import socket
 import sys
 import subprocess
 import tempfile
 from collections import Counter, defaultdict, deque
 from dataclasses import dataclass, field
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 # pyrefly: ignore [missing-import]
 import cv2
@@ -48,6 +50,11 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+payload_dir = PROJECT_ROOT / "payload"
+if str(payload_dir) not in sys.path:
+    sys.path.insert(0, str(payload_dir))
+
+from traffic_payload import TrafficWindowAggregator
 
 from config.krung_thon_bridge_regions import (
     camera_112_lane_rois,
@@ -1873,6 +1880,24 @@ def _configured_timestamp(value: object) -> datetime | None:
     return parse_clock_timestamp(str(value))
 
 
+def send_udp_payload(sock: socket.socket | None, payload: dict[str, Any], host: str, port: int) -> None:
+    if sock is None:
+        return
+    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    summary = payload.get("traffic", {})
+    wrong_way = payload.get("wrong_way", {})
+    print(
+        f"\n[UDP LIVE OUT] {payload.get('location', {}).get('site_id', 'site')} "
+        f"{payload.get('window', {}).get('start')} -> {payload.get('window', {}).get('end')} "
+        f"| vehicles={summary.get('unique_vehicle_count', 0)} wrong_way={wrong_way.get('count', 0)} bytes={len(encoded)}",
+        flush=True,
+    )
+    try:
+        sock.sendto(encoded, (host, port))
+    except Exception as err:
+        print(f"[UDP ERROR] Could not send payload to {host}:{port}: {err}", flush=True)
+
+
 def run_live_tracking_from_settings() -> None:
     """Show the three configured cameras live and persist JSONL as frames arrive."""
     import settings
@@ -1936,6 +1961,23 @@ def run_live_tracking_from_settings() -> None:
         "156": clock_156.isoformat(sep=" ") if clock_156 else None,
     }
 
+    enable_udp = bool(getattr(settings, "ENABLE_UDP_PAYLOAD", True))
+    udp_host = str(getattr(settings, "UDP_HOST", "127.0.0.1"))
+    udp_port = int(getattr(settings, "UDP_PORT", 5005))
+    window_sec = float(getattr(settings, "WINDOW_SECONDS", 30.0))
+    use_wall_clock = bool(getattr(settings, "USE_WALL_CLOCK_TIME", True))
+
+    aggregator = (
+        TrafficWindowAggregator(
+            window_seconds=window_sec,
+            anchor_time=clock_112 or datetime.now(timezone.utc),
+            use_wall_clock=use_wall_clock,
+        )
+        if enable_udp
+        else None
+    )
+    udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) if enable_udp else None
+
     reader_147 = SignalVideoReader(
         signal147_source, "147", float(settings.SIGNAL_147_OFFSET_SECONDS)
     )
@@ -1967,6 +2009,9 @@ def run_live_tracking_from_settings() -> None:
 
     print("Live view started. Press q in any video window to stop immediately.")
     print(f"JSONL logs are being written to: {session_dir}")
+    if enable_udp:
+        print(f"UDP Payloads are streaming live to udp://{udp_host}:{udp_port} every {window_sec}s")
+
     try:
         with (
             log_112.open("w", encoding="utf-8") as handle_112,
@@ -2078,36 +2123,38 @@ def run_live_tracking_from_settings() -> None:
                     direction_by_track=direction_by_track,
                     allowed_by_lane=allowed_by_lane,
                 )
-                append_jsonl_record(
-                    handle_112,
-                    {
-                        "frame": frame_number,
-                        "time_seconds": round(elapsed_seconds, 3),
-                        "mode": "live_tracking",
-                        "camera_profile": profile,
-                        "clock_start_sources": clock_start_sources,
-                        "clock_start_times": clock_start_times,
-                        "camera_timestamps": {
-                            camera: value.isoformat(sep=" ") if value else None
-                            for camera, value in camera_times.items()
-                        },
-                        "timetable_by_lane": schedule_by_lane,
-                        "signal_147_roi_measurements": measurements_147,
-                        "signal_147_states": states_147,
-                        "signal_147_confidence": confidence_147,
-                        "signal_156_roi_measurements": measurements_156,
-                        "signal_156_states": states_156,
-                        "signal_156_confidence": confidence_156,
-                        "lane_signal_fusion": lane_signals,
-                        "lane_directions": {
-                            lane: str(summary["direction"])
-                            for lane, summary in lane_signals.items()
-                        },
-                        "lane_enforcement_directions": allowed_by_lane,
-                        "wrong_way_track_ids": sorted(violations),
-                        "tracks_by_class": grouped,
+                record_112 = {
+                    "frame": frame_number,
+                    "time_seconds": round(elapsed_seconds, 3),
+                    "mode": "live_tracking",
+                    "camera_profile": profile,
+                    "clock_start_sources": clock_start_sources,
+                    "clock_start_times": clock_start_times,
+                    "camera_timestamps": {
+                        camera: value.isoformat(sep=" ") if value else None
+                        for camera, value in camera_times.items()
                     },
-                )
+                    "timetable_by_lane": schedule_by_lane,
+                    "signal_147_roi_measurements": measurements_147,
+                    "signal_147_states": states_147,
+                    "signal_147_confidence": confidence_147,
+                    "signal_156_roi_measurements": measurements_156,
+                    "signal_156_states": states_156,
+                    "signal_156_confidence": confidence_156,
+                    "lane_signal_fusion": lane_signals,
+                    "lane_directions": {
+                        lane: str(summary["direction"])
+                        for lane, summary in lane_signals.items()
+                    },
+                    "lane_enforcement_directions": allowed_by_lane,
+                    "wrong_way_track_ids": sorted(violations),
+                    "tracks_by_class": grouped,
+                }
+                append_jsonl_record(handle_112, record_112)
+                if aggregator and udp_sock:
+                    for payload in aggregator.add_frame(record_112):
+                        send_udp_payload(udp_sock, payload, udp_host, udp_port)
+
                 append_jsonl_record(
                     handle_147,
                     {
@@ -2156,6 +2203,11 @@ def run_live_tracking_from_settings() -> None:
                     print("Stopped by q. Earlier JSONL records have already been saved.")
                     break
     finally:
+        if aggregator and udp_sock:
+            final_payload = aggregator.flush()
+            if final_payload:
+                send_udp_payload(udp_sock, final_payload, udp_host, udp_port)
+            udp_sock.close()
         reader_147.close()
         reader_156.close()
         cv2.destroyAllWindows()
