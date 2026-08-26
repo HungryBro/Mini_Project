@@ -6,14 +6,30 @@ COCO classes used by this project:
 Examples:
     python3 vehicle_tracking.py --source locations/taksin/image/image.png
     python3 vehicle_tracking.py --source locations/taksin/video/taksin_bridge_sathorn_1min.mp4
+
+Traffic-light rules for Krung Thon: use camera 147/156 LEDs first, with a
+colour-confidence score and weighted temporal smoothing to reject flicker.
+The timetable is a fallback: each of cameras 112, 147, and 156 votes from
+its own timestamp and elapsed video time. A clear visual/schedule conflict is
+kept visible but disables wrong-way alerts for safety; weak visual evidence
+uses the timetable instead.
+
+Daily timetable: 05:30-07:30 and 08:20-08:45 = up/up/up/down;
+15:30-16:30, 17:00-17:45, and 18:15-20:30 = up/down/down/down;
+all other times = up/up/down/down. Three matching clocks score 0.92, two
+score 0.85, and one scores 0.75.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
+import subprocess
+import tempfile
 from collections import Counter, defaultdict, deque
 from dataclasses import dataclass, field
+from datetime import datetime, time, timedelta
 from pathlib import Path
 
 # pyrefly: ignore [missing-import]
@@ -81,6 +97,27 @@ PROFILE_AUTO = "auto"
 PROFILE_TAKSIN = "taksin"
 PROFILE_KRUNG_THON = "krung_thon_bridge"
 
+# These periods repeat every day. The values are the expected camera-112 lane
+# directions and intentionally live next to the fusion rules documented in
+# this file so an operator can audit or change them together.
+KRUNG_THON_TIMETABLE = (
+    ("morning", ((time(5, 30), time(7, 30)), (time(8, 20), time(8, 45))), ("up", "up", "up", "down")),
+    ("evening", ((time(15, 30), time(16, 30)), (time(17, 0), time(17, 45)), (time(18, 15), time(20, 30))), ("up", "down", "down", "down")),
+)
+KRUNG_THON_DEFAULT_DIRECTIONS = ("up", "up", "down", "down")
+KNOWN_SIGNAL_STATES = {"green", "red"}
+
+
+def parse_clock_timestamp(value: str) -> datetime:
+    """Parse an operator override for a camera overlay timestamp."""
+    normalized = value.strip().replace("T", " ").replace("/", "-")
+    try:
+        return datetime.strptime(normalized, "%Y-%m-%d %H:%M:%S")
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "Use YYYY-MM-DD HH:MM:SS, for example 2026-08-26 11:06:44"
+        ) from exc
+
 
 def vehicle_class_map(model: YOLO, selected_names: set[str] | None = None) -> dict[int, str]:
     """Match either COCO weights or the project's four-class checkpoint.
@@ -129,6 +166,24 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.0,
         help="Seconds added to camera 112 time when sampling camera 156 (default: 0)",
+    )
+    parser.add_argument(
+        "--timestamp-112",
+        type=parse_clock_timestamp,
+        default=None,
+        help="Camera 112 first-frame timestamp; otherwise read its on-screen clock",
+    )
+    parser.add_argument(
+        "--timestamp-147",
+        type=parse_clock_timestamp,
+        default=None,
+        help="Camera 147 first-frame timestamp; otherwise read its on-screen clock",
+    )
+    parser.add_argument(
+        "--timestamp-156",
+        type=parse_clock_timestamp,
+        default=None,
+        help="Camera 156 first-frame timestamp; otherwise read its on-screen clock",
     )
     parser.add_argument("--conf", type=float, default=0.16)
     parser.add_argument(
@@ -253,16 +308,137 @@ def lane_rois(frame, profile: str) -> dict[str, np.ndarray] | None:
     return camera_112_lane_rois(frame)
 
 
-def direction_from_signal(camera: str, signal_state: str) -> str:
-    """Translate a signal LED colour to the travel direction in camera 112.
+def timetable_directions(timestamp: datetime | None) -> tuple[dict[str, str] | None, str | None]:
+    """Return the daily timetable direction map at one camera timestamp."""
+    if timestamp is None:
+        return None, None
+    now = timestamp.time()
+    for period, windows, directions in KRUNG_THON_TIMETABLE:
+        if any(start <= now < end for start, end in windows):
+            return {f"lane_{index}": direction for index, direction in enumerate(directions, start=1)}, period
+    return {f"lane_{index}": direction for index, direction in enumerate(KRUNG_THON_DEFAULT_DIRECTIONS, start=1)}, "default"
 
-    Camera 147 faces the same direction as camera 112: green means ``up`` and
-    red means ``down``.  Camera 156 sees the opposite end of the reversible
-    lane, so its physical LED meaning is inverted: red means ``up`` and green
-    means ``down``.  Its regions are already keyed to the matching camera 112
-    lane in ``krung_thon_bridge_regions.py``.
+
+def fuse_schedule_clocks(camera_times: dict[str, datetime | None]) -> dict[str, dict[str, object]]:
+    """Vote timetable directions using the independently stamped three cameras."""
+    camera_votes: dict[str, dict[str, str]] = {}
+    periods: dict[str, str] = {}
+    for camera, timestamp in camera_times.items():
+        directions, period = timetable_directions(timestamp)
+        if directions is not None and period is not None:
+            camera_votes[camera] = directions
+            periods[camera] = period
+
+    fused: dict[str, dict[str, object]] = {}
+    confidence_by_count = {1: 0.75, 2: 0.85, 3: 0.92}
+    for index in range(1, 5):
+        lane = f"lane_{index}"
+        votes = {camera: directions[lane] for camera, directions in camera_votes.items()}
+        if not votes:
+            fused[lane] = {
+                "direction": "unknown",
+                "confidence": 0.0,
+                "sources": [],
+                "periods": {},
+                "timestamps": {},
+            }
+            continue
+        counts = Counter(votes.values())
+        direction, count = counts.most_common(1)[0]
+        agreeing_sources = [camera for camera, vote in votes.items() if vote == direction]
+        fused[lane] = {
+            "direction": direction,
+            "confidence": confidence_by_count[len(agreeing_sources)],
+            "sources": agreeing_sources,
+            "periods": {camera: periods[camera] for camera in agreeing_sources},
+            "timestamps": {
+                camera: camera_times[camera].isoformat(sep=" ")
+                for camera in agreeing_sources
+                if camera_times[camera] is not None
+            },
+        }
+    return fused
+
+
+def timestamp_at(start_timestamp: datetime | None, elapsed_seconds: float) -> datetime | None:
+    return start_timestamp + timedelta(seconds=elapsed_seconds) if start_timestamp else None
+
+
+def _clock_crop(frame: np.ndarray, camera: str) -> np.ndarray:
+    """Crop the known on-screen timestamp location for the three cameras."""
+    height, width = frame.shape[:2]
+    if camera == "112":
+        return frame[: min(height, 62), : min(width, 310)]
+    return frame[max(0, height - 78): height, max(0, width - 320): width]
+
+
+def read_timestamp_from_frame(frame: np.ndarray, camera: str, scratch_dir: Path) -> datetime | None:
+    """OCR one clock overlay once; operator-supplied timestamps remain available.
+
+    Tesseract is only invoked for the first frame of each input video, never
+    per frame. If it is unavailable or cannot read the overlay, the caller
+    simply omits that camera from the schedule vote.
     """
-    if signal_state not in {"green", "red"}:
+    crop = _clock_crop(frame, camera)
+    if crop.size == 0:
+        return None
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    enlarged = cv2.resize(gray, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
+    prepared = enlarged
+    scratch_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        prefix=f"clock_{camera}_", suffix=".png", dir=scratch_dir, delete=False
+    ) as temporary:
+        image_path = Path(temporary.name)
+    try:
+        if not cv2.imwrite(str(image_path), prepared):
+            return None
+        result = subprocess.run(
+            ["tesseract", str(image_path), "stdout", "--psm", "6"],
+            check=False,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=10,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return None
+    finally:
+        image_path.unlink(missing_ok=True)
+    match = re.search(r"20\d{2}[-/]\d{2}[-/]\d{2}\s+\d{2}:\d{2}:\d{2}", result.stdout)
+    if not match:
+        return None
+    try:
+        return parse_clock_timestamp(match.group())
+    except argparse.ArgumentTypeError:
+        return None
+
+
+def read_video_start_timestamp(source: Path, camera: str, scratch_dir: Path) -> datetime | None:
+    """Read a camera timestamp from only the first frame of its input video."""
+    capture = cv2.VideoCapture(str(source))
+    try:
+        ok, frame = capture.read()
+        return read_timestamp_from_frame(frame, camera, scratch_dir) if ok else None
+    finally:
+        capture.release()
+
+
+def resolve_start_timestamp(
+    source: Path | None, camera: str, override: datetime | None, scratch_dir: Path
+) -> tuple[datetime | None, str]:
+    """Use the explicit value first, then one OSD read from that camera."""
+    if override is not None:
+        return override, "argument"
+    if source is None:
+        return None, "unavailable"
+    detected = read_video_start_timestamp(source, camera, scratch_dir)
+    return (detected, "osd_ocr") if detected else (None, "unavailable")
+
+
+def direction_from_signal(camera: str, signal_state: str) -> str:
+    """Translate a signal LED colour to the travel direction in camera 112."""
+    if signal_state not in KNOWN_SIGNAL_STATES:
         return "unknown"
     if camera == "156":
         return "down" if signal_state == "green" else "up"
@@ -274,114 +450,167 @@ def allowed_direction(signal_state: str) -> str:
     return direction_from_signal("147", signal_state)
 
 
+def _visual_signal_decision(
+    direction_147: str, confidence_147: float, direction_156: str, confidence_156: float
+) -> tuple[str, float, str, bool | None]:
+    """Choose a visual lane direction only when its light evidence is clear."""
+    known_147 = direction_147 in {"up", "down"}
+    known_156 = direction_156 in {"up", "down"}
+    if known_147 and known_156 and direction_147 == direction_156:
+        confidence = min(0.99, 0.55 + 0.45 * ((confidence_147 + confidence_156) / 2))
+        return direction_147, confidence, "visual_both", True
+    if known_147 and known_156:
+        if confidence_147 >= 0.80 and confidence_147 >= confidence_156 + 0.18:
+            return direction_147, confidence_147, "visual_147", False
+        if confidence_156 >= 0.80 and confidence_156 >= confidence_147 + 0.18:
+            return direction_156, confidence_156, "visual_156", False
+        return "unknown", max(confidence_147, confidence_156), "visual_conflict", False
+    if known_147:
+        return direction_147, confidence_147, "visual_147", None
+    if known_156:
+        return direction_156, confidence_156, "visual_156", None
+    return "unknown", 0.0, "visual_unknown", None
+
+
 def fuse_lane_signals(
     states_147: dict[str, str] | None,
     states_156: dict[str, str] | None,
+    confidence_147: dict[str, float] | None = None,
+    confidence_156: dict[str, float] | None = None,
+    schedule_by_lane: dict[str, dict[str, object]] | None = None,
 ) -> dict[str, dict[str, object]]:
-    """Fuse the two signal cameras into one complete direction per lane.
-
-    A readable state from either camera is enough.  When both provide the same
-    direction the result is marked ``both``.  A true disagreement stays
-    visible as ``conflict_147_priority`` but still yields a deterministic
-    direction for camera 112; camera 147 is the priority because its signal
-    boards occupy more pixels in this dataset.
-    """
+    """Fuse visual LEDs with a schedule fallback and a safe conflict state."""
     states_147 = states_147 or {}
     states_156 = states_156 or {}
+    confidence_147 = confidence_147 or {}
+    confidence_156 = confidence_156 or {}
+    schedule_by_lane = schedule_by_lane or {}
     fused: dict[str, dict[str, object]] = {}
     for index in range(1, 5):
         lane = f"lane_{index}"
         light_147 = states_147.get(lane, "unknown")
         light_156 = states_156.get(lane, "unknown")
+        light_confidence_147 = float(confidence_147.get(lane, 0.0))
+        light_confidence_156 = float(confidence_156.get(lane, 0.0))
         direction_147 = direction_from_signal("147", light_147)
         direction_156 = direction_from_signal("156", light_156)
-        known_147 = direction_147 != "unknown"
-        known_156 = direction_156 != "unknown"
-        if known_147 and known_156 and direction_147 == direction_156:
-            final_direction, source, agrees = direction_147, "both", True
-        elif known_147 and known_156:
-            final_direction, source, agrees = direction_147, "conflict_147_priority", False
-        elif known_147:
-            final_direction, source, agrees = direction_147, "147", None
-        elif known_156:
-            final_direction, source, agrees = direction_156, "156", None
+        visual_direction, visual_confidence, visual_source, agrees = _visual_signal_decision(
+            direction_147, light_confidence_147, direction_156, light_confidence_156
+        )
+        schedule = schedule_by_lane.get(lane, {})
+        schedule_direction = str(schedule.get("direction", "unknown"))
+        schedule_confidence = float(schedule.get("confidence", 0.0))
+        visual_reliable = (
+            visual_source == "visual_both" and visual_confidence >= 0.72
+        ) or (visual_source in {"visual_147", "visual_156"} and visual_confidence >= 0.78)
+        if visual_reliable and schedule_direction in {"up", "down"} and visual_direction != schedule_direction:
+            direction, enforcement_direction, source = visual_direction, "unknown", "schedule_conflict_safe"
+        elif visual_reliable:
+            direction, enforcement_direction, source = visual_direction, visual_direction, visual_source
+        elif schedule_direction in {"up", "down"}:
+            direction, enforcement_direction, source = schedule_direction, schedule_direction, "schedule_fallback"
         else:
-            final_direction, source, agrees = "unknown", "none", None
+            direction, enforcement_direction, source = "unknown", "unknown", "unknown"
         fused[lane] = {
             "light_147": light_147,
             "light_156": light_156,
+            "light_confidence_147": round(light_confidence_147, 3),
+            "light_confidence_156": round(light_confidence_156, 3),
             "direction_147": direction_147,
             "direction_156": direction_156,
-            "direction": final_direction,
+            "visual_direction": visual_direction,
+            "visual_confidence": round(visual_confidence, 3),
+            "schedule_direction": schedule_direction,
+            "schedule_confidence": round(schedule_confidence, 3),
+            "schedule_sources": list(schedule.get("sources", [])),
+            "schedule_periods": dict(schedule.get("periods", {})),
+            "schedule_timestamps": dict(schedule.get("timestamps", {})),
+            "direction": direction,
+            "enforcement_direction": enforcement_direction,
             "source": source,
             "agrees": agrees,
         }
     return fused
 
 
-def classify_signal_state(frame: np.ndarray, polygon: np.ndarray) -> str:
-    """Classify a small overhead signal as green, red, or unknown.
-
-    The signal ROIs are only a few pixels high.  We therefore require a small
-    aggregate colored region instead of trusting the average color, which
-    would mistake the bridge structure and sky for a signal.
-    """
+def classify_signal_measurement(frame: np.ndarray, polygon: np.ndarray) -> dict[str, object]:
+    """Classify one LED ROI and quantify how clearly its colour is visible."""
     mask = np.zeros(frame.shape[:2], dtype=np.uint8)
     cv2.fillPoly(mask, [polygon.astype(np.int32)], 255)
-    # The top two rows are frequently a black-camera border or compression
-    # edge, not part of the LED display.
     mask[:2] = 0
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     hue, saturation, value = cv2.split(hsv)
     green = (
-        (hue >= 70)
-        & (hue <= 130)
-        & (saturation >= 40)
-        & (value >= 30)
-        & (mask > 0)
+        (hue >= 70) & (hue <= 130) & (saturation >= 40) & (value >= 30) & (mask > 0)
     ).astype(np.uint8)
     red = (
-        ((hue <= 20) | (hue >= 150))
-        & (saturation >= 40)
-        & (value >= 30)
-        & (mask > 0)
+        ((hue <= 20) | (hue >= 150)) & (saturation >= 40) & (value >= 30) & (mask > 0)
     ).astype(np.uint8)
-
     area = max(1, int((mask > 0).sum()))
-    # LED arrows are intentionally low-resolution and often appear as several
-    # disconnected pixels after H.264 compression.  Aggregate colored pixels
-    # rather than requiring one connected blob.
-    green_area = int(green.sum())
-    red_area = int(red.sum())
-    green_score = green_area / area
-    red_score = red_area / area
-    # Green boards occupy most of the display face.  Red X/arrow LEDs are
-    # dimmer and fragmented, so they use a lower but still conservative ratio.
+    green_area, red_area = int(green.sum()), int(red.sum())
+    green_score, red_score = green_area / area, red_area / area
+
+    state = "unknown"
+    confidence = 0.0
     if green_area >= 20 and green_score >= 0.50 and green_score > red_score * 1.25:
-        return "green"
-    if red_area >= 8 and red_score >= 0.03:
-        return "red"
-    return "unknown"
+        separation = min(1.0, (green_score - red_score) / max(green_score, 0.01))
+        coverage = min(1.0, green_score / 0.75)
+        state = "green"
+        confidence = 0.45 + 0.55 * coverage * separation
+    elif red_area >= 8 and red_score >= 0.03 and red_score > green_score * 1.10:
+        separation = min(1.0, (red_score - green_score) / max(red_score, 0.01))
+        coverage = min(1.0, red_score / 0.12)
+        pixel_strength = min(1.0, red_area / 28)
+        state = "red"
+        confidence = 0.40 + 0.60 * coverage * pixel_strength * separation
+    return {
+        "state": state,
+        "confidence": round(float(confidence), 3),
+        "green_score": round(float(green_score), 3),
+        "red_score": round(float(red_score), 3),
+    }
+
+
+def classify_signal_state(frame: np.ndarray, polygon: np.ndarray) -> str:
+    """Backward-compatible state-only signal classifier."""
+    return str(classify_signal_measurement(frame, polygon)["state"])
 
 
 class SignalStateSmoother:
-    """Suppress one-frame color glitches in the tiny camera 147 ROIs."""
+    """Use a weighted half-second history to suppress tiny-ROI colour flicker."""
 
-    def __init__(self, window: int = 7):
-        self.history: dict[str, deque[str]] = defaultdict(lambda: deque(maxlen=window))
+    def __init__(self, window: int = 15):
+        self.history: dict[str, deque[tuple[str, float]]] = defaultdict(lambda: deque(maxlen=window))
 
-    def update(self, raw_states: dict[str, str]) -> dict[str, str]:
+    def update(
+        self, raw_states: dict[str, str], raw_confidence: dict[str, float] | None = None
+    ) -> tuple[dict[str, str], dict[str, float]]:
+        raw_confidence = raw_confidence or {}
         stable: dict[str, str] = {}
-        for lane, state in raw_states.items():
-            if state != "unknown":
-                self.history[lane].append(state)
-            values = list(self.history[lane])
-            stable[lane] = Counter(values).most_common(1)[0][0] if values else "unknown"
-        return stable
+        confidence: dict[str, float] = {}
+        for index in range(1, 5):
+            lane = f"lane_{index}"
+            state = raw_states.get(lane, "unknown")
+            value = float(raw_confidence.get(lane, 0.0)) if state in KNOWN_SIGNAL_STATES else 0.0
+            self.history[lane].append((state, value))
+            known = [(name, weight) for name, weight in self.history[lane] if name in KNOWN_SIGNAL_STATES]
+            if not known:
+                stable[lane], confidence[lane] = "unknown", 0.0
+                continue
+            weights: dict[str, float] = defaultdict(float)
+            for name, weight in known:
+                weights[name] += weight
+            best_state, best_weight = max(weights.items(), key=lambda item: item[1])
+            total_weight = sum(weights.values())
+            winning = [weight for name, weight in known if name == best_state]
+            coverage = min(1.0, len(known) / 4)
+            stable[lane] = best_state
+            confidence[lane] = round((sum(winning) / len(winning)) * (best_weight / max(total_weight, 0.001)) * coverage, 3)
+        return stable, confidence
 
 
 class SignalVideoReader:
-    """Read one signal-camera stream by elapsed camera 112 time."""
+    """Read one signal-camera stream by elapsed camera-112 time."""
 
     def __init__(self, source: Path, camera: str, offset_seconds: float = 0.0):
         self.source = source
@@ -394,7 +623,7 @@ class SignalVideoReader:
         self.next_frame = 0
         self.last_frame: np.ndarray | None = None
 
-    def states_at(self, elapsed_seconds: float) -> dict[str, dict[str, str]]:
+    def measurements_at(self, elapsed_seconds: float) -> dict[str, dict[str, dict[str, object]]]:
         target = max(0, round((elapsed_seconds + self.offset_seconds) * self.fps))
         if target < self.next_frame:
             self.capture.set(cv2.CAP_PROP_POS_FRAMES, target)
@@ -406,11 +635,12 @@ class SignalVideoReader:
             self.last_frame = frame
             self.next_frame += 1
         if self.last_frame is None:
-            return {
-                f"lane_{index}": {"primary": "unknown"}
-                for index in range(1, 5)
-            }
-        return classify_signal_roi_states(self.last_frame, self.camera)
+            return {f"lane_{index}": {"primary": {"state": "unknown", "confidence": 0.0}} for index in range(1, 5)}
+        return classify_signal_roi_measurements(self.last_frame, self.camera)
+
+    def states_at(self, elapsed_seconds: float) -> dict[str, dict[str, str]]:
+        measurements = self.measurements_at(elapsed_seconds)
+        return {lane: {name: str(value["state"]) for name, value in roi_set.items()} for lane, roi_set in measurements.items()}
 
     def close(self) -> None:
         self.capture.release()
@@ -422,43 +652,66 @@ def signal_rois_for_camera(frame: np.ndarray, camera: str) -> dict[str, dict[str
     return camera_147_signal_rois(frame)
 
 
-def classify_signal_roi_states(frame: np.ndarray, camera: str) -> dict[str, dict[str, str]]:
-    """Read every primary/backup LED ROI for one signal camera."""
+def classify_signal_roi_measurements(
+    frame: np.ndarray, camera: str
+) -> dict[str, dict[str, dict[str, object]]]:
+    """Read every primary/backup LED ROI with confidence values."""
     return {
-        lane: {name: classify_signal_state(frame, polygon) for name, polygon in roi_set.items()}
+        lane: {name: classify_signal_measurement(frame, polygon) for name, polygon in roi_set.items()}
         for lane, roi_set in signal_rois_for_camera(frame, camera).items()
     }
+
+
+def classify_signal_roi_states(frame: np.ndarray, camera: str) -> dict[str, dict[str, str]]:
+    """Backward-compatible state-only view of all LED ROIs."""
+    measurements = classify_signal_roi_measurements(frame, camera)
+    return {lane: {name: str(value["state"]) for name, value in roi_set.items()} for lane, roi_set in measurements.items()}
+
+
+def resolve_signal_roi_measurements(
+    measurements: dict[str, dict[str, dict[str, object]]]
+) -> tuple[dict[str, str], dict[str, float], dict[str, str]]:
+    """Use a backup ROI when it is clearer than a weak primary LED ROI."""
+    resolved: dict[str, str] = {}
+    confidence: dict[str, float] = {}
+    source: dict[str, str] = {}
+    for index in range(1, 5):
+        lane = f"lane_{index}"
+        values = measurements.get(lane, {})
+        candidates = [
+            (name, str(value.get("state", "unknown")), float(value.get("confidence", 0.0)))
+            for name, value in values.items()
+            if str(value.get("state", "unknown")) in KNOWN_SIGNAL_STATES
+        ]
+        if not candidates:
+            resolved[lane], confidence[lane], source[lane] = "unknown", 0.0, "unknown"
+            continue
+        candidates.sort(key=lambda item: item[2], reverse=True)
+        best_name, best_state, best_confidence = candidates[0]
+        second = candidates[1] if len(candidates) > 1 else None
+        if second and second[1] != best_state and second[2] >= best_confidence - 0.12:
+            resolved[lane], confidence[lane], source[lane] = "unknown", 0.0, "roi_conflict"
+            continue
+        same_colour = [item for item in candidates if item[1] == best_state]
+        if len(same_colour) > 1:
+            best_confidence = min(0.99, max(item[2] for item in same_colour) + 0.06)
+            best_name = "+".join(item[0] for item in same_colour)
+        resolved[lane] = best_state
+        confidence[lane] = round(best_confidence, 3)
+        source[lane] = best_name
+    return resolved, confidence, source
 
 
 def resolve_signal_roi_states(
     roi_states: dict[str, dict[str, str]]
 ) -> tuple[dict[str, str], dict[str, str]]:
-    """Select one reliable LED colour per lane from its primary/backup ROIs.
-
-    The primary remains authoritative when it is readable.  A backup takes
-    over only when the primary is ``unknown``.  If two readable backup ROIs
-    disagree, the lane is kept unknown rather than guessing.
-    """
-    resolved: dict[str, str] = {}
-    source: dict[str, str] = {}
-    for index in range(1, 5):
-        lane = f"lane_{index}"
-        values = roi_states.get(lane, {})
-        primary = values.get("primary", "unknown")
-        backup_values = [
-            state for name, state in values.items()
-            if name != "primary" and state in {"green", "red"}
-        ]
-        if primary in {"green", "red"}:
-            resolved[lane] = primary
-            source[lane] = "primary"
-        elif len(set(backup_values)) == 1 and backup_values:
-            resolved[lane] = backup_values[0]
-            source[lane] = "backup"
-        else:
-            resolved[lane] = "unknown"
-            source[lane] = "unknown"
-    return resolved, source
+    """Retain the older state-only resolver for callers outside video mode."""
+    measurements = {
+        lane: {name: {"state": state, "confidence": 1.0 if state in KNOWN_SIGNAL_STATES else 0.0} for name, state in values.items()}
+        for lane, values in roi_states.items()
+    }
+    states, _confidence, sources = resolve_signal_roi_measurements(measurements)
+    return states, sources
 
 
 def box_is_inside_roi(box, roi_points: np.ndarray | None) -> bool:
@@ -777,10 +1030,25 @@ def draw_bridge_guides(
             direction = str(summary.get("direction", "unknown"))
             light_147 = str(summary.get("light_147", "unknown"))[0].upper()
             light_156 = str(summary.get("light_156", "unknown"))[0].upper()
-            source = str(summary.get("source", "none"))
+            visual_confidence = float(summary.get("visual_confidence", 0.0))
+            schedule_direction = str(summary.get("schedule_direction", "unknown"))[0].upper()
+            schedule_confidence = float(summary.get("schedule_confidence", 0.0))
+            source = str(summary.get("source", "unknown"))
+            source_label = {
+                "visual_both": "visual",
+                "visual_147": "147",
+                "visual_156": "156",
+                "schedule_fallback": "schedule",
+                "schedule_conflict_safe": "safe conflict",
+            }.get(source, "unknown")
             color = {"up": (0, 220, 0), "down": (0, 0, 255)}.get(direction, (0, 220, 220))
-            panel_lines.append((f"L{index}: {direction} | 147:{light_147} 156:{light_156} | {source}", color))
-        draw_text_panel(frame, panel_lines, "top_right")
+            # Two short rows per lane keep the panel entirely in the right-side
+            # margin instead of spanning into the road and vehicle tracks.
+            panel_lines.extend((
+                (f"L{index} {direction.upper()} | {source_label}", color),
+                (f"V:{visual_confidence:.2f} 147:{light_147} 156:{light_156} S:{schedule_direction} {schedule_confidence:.2f}", color),
+            ))
+        draw_text_panel(frame, panel_lines, "top_right", font_scale=0.36, padding=6, margin=8)
     if not show_gates:
         return
     gate_specs = (("GATE A", GATE_A_NORMALIZED, (255, 0, 0)), ("GATE B", GATE_B_NORMALIZED, (0, 0, 255)))
@@ -795,29 +1063,40 @@ def draw_signal_guides(
     frame: np.ndarray,
     camera: str,
     signal_states: dict[str, str],
-    roi_states: dict[str, dict[str, str]] | None = None,
+    signal_confidence: dict[str, float] | None = None,
+    roi_measurements: dict[str, dict[str, dict[str, object]]] | None = None,
     selected_sources: dict[str, str] | None = None,
+    clock_timestamp: datetime | None = None,
 ) -> None:
-    """Draw all primary/backup LED ROIs and their selected lane states."""
+    """Draw light state and confidence for every primary/backup signal ROI."""
     rois = signal_rois_for_camera(frame, camera)
-    roi_states = roi_states or {}
+    signal_confidence = signal_confidence or {}
+    roi_measurements = roi_measurements or {}
     selected_sources = selected_sources or {}
-    panel_lines: list[tuple[str, tuple[int, int, int]]] = [(f"CAMERA {camera} LIGHTS", (255, 255, 255))]
+    heading = f"CAMERA {camera} LIGHTS"
+    if clock_timestamp is not None:
+        heading = f"{heading} | {clock_timestamp:%Y-%m-%d %H:%M:%S}"
+    panel_lines: list[tuple[str, tuple[int, int, int]]] = [(heading, (255, 255, 255))]
+    schedule_directions, _period = timetable_directions(clock_timestamp)
     for index in range(1, 5):
         lane = f"lane_{index}"
         light = signal_states.get(lane, "unknown")
+        light_confidence = float(signal_confidence.get(lane, 0.0))
         direction = direction_from_signal(camera, light)
-        # green/red are the actual LED colours.  Yellow is only for unknown.
         color = {"green": (0, 220, 0), "red": (0, 0, 255)}.get(light, (0, 220, 220))
         labels: list[str] = []
         for roi_name, polygon in rois[lane].items():
-            roi_light = roi_states.get(lane, {}).get(roi_name, "unknown")
+            measurement = roi_measurements.get(lane, {}).get(roi_name, {})
+            roi_light = str(measurement.get("state", "unknown"))
+            roi_confidence = float(measurement.get("confidence", 0.0))
             roi_color = {"green": (0, 220, 0), "red": (0, 0, 255)}.get(roi_light, (0, 220, 220))
             cv2.polylines(frame, [polygon], True, roi_color, 2, cv2.LINE_AA)
-            labels.append(f"{roi_name[0].upper()}={roi_light}")
+            labels.append(f"{roi_name[0].upper()}={roi_light} {roi_confidence:.2f}")
         source = selected_sources.get(lane, "unknown")
+        schedule = schedule_directions.get(lane, "-") if schedule_directions else "-"
+        labels_text = " ".join(labels)
         panel_lines.append((
-            f"112 L{index}: {' '.join(labels)} -> {light} ({source}) -> {direction}",
+            f"112 L{index}: {labels_text} -> {light} {light_confidence:.2f} ({source}) -> {direction} | sch:{schedule}",
             color,
         ))
     draw_text_panel(frame, panel_lines, "bottom_left")
@@ -1013,8 +1292,10 @@ def annotated_frame(
     return frame
 
 
-def render_signal_view(source: Path, output_dir: Path, camera: str) -> tuple[Path, Path]:
-    """Write an annotated signal-camera view and matching state JSONL."""
+def render_signal_view(
+    source: Path, output_dir: Path, camera: str, start_timestamp: datetime | None = None
+) -> tuple[Path, Path]:
+    """Write an annotated signal-camera view with colour confidence records."""
     output_dir.mkdir(parents=True, exist_ok=True)
     capture = cv2.VideoCapture(str(source))
     if not capture.isOpened():
@@ -1036,18 +1317,28 @@ def render_signal_view(source: Path, output_dir: Path, camera: str) -> tuple[Pat
                 ok, frame = capture.read()
                 if not ok:
                     break
-                roi_states = classify_signal_roi_states(frame, camera)
-                raw_states, selected_sources = resolve_signal_roi_states(roi_states)
-                states = smoother.update(raw_states)
+                measurements = classify_signal_roi_measurements(frame, camera)
+                raw_states, raw_confidence, selected_sources = resolve_signal_roi_measurements(measurements)
+                states, confidence = smoother.update(raw_states, raw_confidence)
+                clock_timestamp = timestamp_at(start_timestamp, frame_number / fps)
                 annotated = frame.copy()
-                draw_signal_guides(annotated, camera, states, roi_states, selected_sources)
+                draw_signal_guides(
+                    annotated, camera, states, confidence, measurements, selected_sources, clock_timestamp
+                )
                 writer.write(annotated)
+                roi_states = {
+                    lane: {name: str(value["state"]) for name, value in roi_set.items()}
+                    for lane, roi_set in measurements.items()
+                }
                 record = {
                     "frame": frame_number,
                     "time_seconds": round(frame_number / fps, 3),
                     "camera": camera,
+                    "clock_timestamp": clock_timestamp.isoformat(sep=" ") if clock_timestamp else None,
+                    "light_roi_measurements": measurements,
                     "light_roi_states": roi_states,
                     "light_states": states,
+                    "light_confidence": confidence,
                     "selected_light_source": selected_sources,
                     "directions_for_camera_112": {
                         lane: direction_from_signal(camera, light)
@@ -1097,23 +1388,27 @@ def run_image(
     lane_points = lane_filter_points if show_lanes else None
     states_147: dict[str, str] = {}
     states_156: dict[str, str] = {}
-    roi_states_147: dict[str, dict[str, str]] = {}
-    roi_states_156: dict[str, dict[str, str]] = {}
+    confidence_147: dict[str, float] = {}
+    confidence_156: dict[str, float] = {}
+    roi_measurements_147: dict[str, dict[str, dict[str, object]]] = {}
+    roi_measurements_156: dict[str, dict[str, dict[str, object]]] = {}
     selected_147: dict[str, str] = {}
     selected_156: dict[str, str] = {}
     reader_147 = SignalVideoReader(signal147_source, "147", signal147_offset) if signal147_source else None
     reader_156 = SignalVideoReader(signal156_source, "156", signal156_offset) if signal156_source else None
     if reader_147:
-        roi_states_147 = reader_147.states_at(0.0)
-        raw_states_147, selected_147 = resolve_signal_roi_states(roi_states_147)
-        states_147 = SignalStateSmoother().update(raw_states_147)
+        roi_measurements_147 = reader_147.measurements_at(0.0)
+        raw_states_147, raw_confidence_147, selected_147 = resolve_signal_roi_measurements(roi_measurements_147)
+        states_147, confidence_147 = raw_states_147, raw_confidence_147
         reader_147.close()
     if reader_156:
-        roi_states_156 = reader_156.states_at(0.0)
-        raw_states_156, selected_156 = resolve_signal_roi_states(roi_states_156)
-        states_156 = SignalStateSmoother().update(raw_states_156)
+        roi_measurements_156 = reader_156.measurements_at(0.0)
+        raw_states_156, raw_confidence_156, selected_156 = resolve_signal_roi_measurements(roi_measurements_156)
+        states_156, confidence_156 = raw_states_156, raw_confidence_156
         reader_156.close()
-    lane_signals = fuse_lane_signals(states_147, states_156)
+    roi_states_147 = {lane: {name: str(value["state"]) for name, value in values.items()} for lane, values in roi_measurements_147.items()}
+    roi_states_156 = {lane: {name: str(value["state"]) for name, value in values.items()} for lane, values in roi_measurements_156.items()}
+    lane_signals = fuse_lane_signals(states_147, states_156, confidence_147, confidence_156)
     allowed_by_lane = {lane: str(summary["direction"]) for lane, summary in lane_signals.items()}
     grouped = grouped_detection(
         result,
@@ -1150,11 +1445,15 @@ def run_image(
         if bridge_only and show_gates
         else None,
         "detections_by_class": grouped,
+        "signal_147_roi_measurements": roi_measurements_147,
         "signal_147_roi_states": roi_states_147,
         "signal_147_states": states_147,
+        "signal_147_confidence": confidence_147,
         "signal_147_selected_light_source": selected_147,
+        "signal_156_roi_measurements": roi_measurements_156,
         "signal_156_roi_states": roi_states_156,
         "signal_156_states": states_156,
+        "signal_156_confidence": confidence_156,
         "signal_156_selected_light_source": selected_156,
         "lane_signal_fusion": lane_signals,
         "lane_direction_rule": "147: green=up/red=down; 156: green=down/red=up; unknown uses the other camera",
@@ -1186,10 +1485,26 @@ def run_video(
     signal147_offset: float,
     signal156_source: Path | None,
     signal156_offset: float,
+    timestamp_112: datetime | None,
+    timestamp_147: datetime | None,
+    timestamp_156: datetime | None,
     save_signal_views: bool,
     alert_wrong_way: bool,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
+    if profile == PROFILE_KRUNG_THON:
+        clock_112, clock_source_112 = resolve_start_timestamp(source, "112", timestamp_112, output_dir)
+        clock_147, clock_source_147 = resolve_start_timestamp(signal147_source, "147", timestamp_147, output_dir)
+        clock_156, clock_source_156 = resolve_start_timestamp(signal156_source, "156", timestamp_156, output_dir)
+    else:
+        clock_112 = clock_147 = clock_156 = None
+        clock_source_112 = clock_source_147 = clock_source_156 = "disabled"
+    clock_start_sources = {"112": clock_source_112, "147": clock_source_147, "156": clock_source_156}
+    clock_start_times = {
+        "112": clock_112.isoformat(sep=" ") if clock_112 else None,
+        "147": clock_147.isoformat(sep=" ") if clock_147 else None,
+        "156": clock_156.isoformat(sep=" ") if clock_156 else None,
+    }
     apply_class_aliases(model, class_aliases)
     video_path = output_dir / f"{source.stem}_tracked.mp4"
     jsonl_path = output_dir / f"{source.stem}_tracks.jsonl"
@@ -1234,14 +1549,26 @@ def run_video(
                 roi_points = bridge_roi(result.orig_img, profile) if bridge_only else None
                 lane_filter_points = lane_rois(result.orig_img, profile)
                 lane_points = lane_filter_points if show_lanes else None
-                roi_states_147 = reader_147.states_at(elapsed_seconds) if reader_147 else {}
-                roi_states_156 = reader_156.states_at(elapsed_seconds) if reader_156 else {}
-                raw_147, selected_147 = resolve_signal_roi_states(roi_states_147) if roi_states_147 else ({}, {})
-                raw_156, selected_156 = resolve_signal_roi_states(roi_states_156) if roi_states_156 else ({}, {})
-                states_147 = smoother_147.update(raw_147) if raw_147 else {}
-                states_156 = smoother_156.update(raw_156) if raw_156 else {}
-                lane_signals = fuse_lane_signals(states_147, states_156)
-                allowed_by_lane = {lane: str(summary["direction"]) for lane, summary in lane_signals.items()}
+                measurements_147 = reader_147.measurements_at(elapsed_seconds) if reader_147 else {}
+                measurements_156 = reader_156.measurements_at(elapsed_seconds) if reader_156 else {}
+                raw_147, raw_confidence_147, selected_147 = resolve_signal_roi_measurements(measurements_147) if measurements_147 else ({}, {}, {})
+                raw_156, raw_confidence_156, selected_156 = resolve_signal_roi_measurements(measurements_156) if measurements_156 else ({}, {}, {})
+                states_147, confidence_147 = smoother_147.update(raw_147, raw_confidence_147) if raw_147 else ({}, {})
+                states_156, confidence_156 = smoother_156.update(raw_156, raw_confidence_156) if raw_156 else ({}, {})
+                roi_states_147 = {lane: {name: str(value["state"]) for name, value in values.items()} for lane, values in measurements_147.items()}
+                roi_states_156 = {lane: {name: str(value["state"]) for name, value in values.items()} for lane, values in measurements_156.items()}
+                camera_times = {
+                    "112": timestamp_at(clock_112, elapsed_seconds),
+                    "147": timestamp_at(clock_147, elapsed_seconds + signal147_offset),
+                    "156": timestamp_at(clock_156, elapsed_seconds + signal156_offset),
+                }
+                schedule_by_lane = fuse_schedule_clocks(camera_times)
+                lane_signals = fuse_lane_signals(
+                    states_147, states_156, confidence_147, confidence_156, schedule_by_lane
+                )
+                allowed_by_lane = {
+                    lane: str(summary["enforcement_direction"]) for lane, summary in lane_signals.items()
+                }
                 label_overrides, retained_tracks = stabilized_tracks(
                     result,
                     class_map,
@@ -1292,14 +1619,23 @@ def run_video(
                     "frame": frame_number,
                     "time_seconds": round(elapsed_seconds, 3),
                     "camera_profile": profile,
+                    "clock_start_sources": clock_start_sources,
+                    "clock_start_times": clock_start_times,
+                    "camera_timestamps": {camera: value.isoformat(sep=" ") if value else None for camera, value in camera_times.items()},
+                    "timetable_by_lane": schedule_by_lane,
+                    "signal_147_roi_measurements": measurements_147,
                     "signal_147_roi_states": roi_states_147,
                     "signal_147_states": states_147,
+                    "signal_147_confidence": confidence_147,
                     "signal_147_selected_light_source": selected_147,
+                    "signal_156_roi_measurements": measurements_156,
                     "signal_156_roi_states": roi_states_156,
                     "signal_156_states": states_156,
+                    "signal_156_confidence": confidence_156,
                     "signal_156_selected_light_source": selected_156,
                     "lane_signal_fusion": lane_signals,
-                    "lane_directions": allowed_by_lane,
+                    "lane_directions": {lane: str(summary["direction"]) for lane, summary in lane_signals.items()},
+                    "lane_enforcement_directions": allowed_by_lane,
                     "wrong_way_track_ids": sorted(violations),
                     "tracks_by_class": grouped,
                 }
@@ -1316,11 +1652,11 @@ def run_video(
     print(f"Annotated video: {video_path}")
     if save_signal_views:
         if signal147_source:
-            signal_video, signal_jsonl = render_signal_view(signal147_source, output_dir, "147")
+            signal_video, signal_jsonl = render_signal_view(signal147_source, output_dir, "147", clock_147)
             print(f"Camera 147 light view: {signal_video}")
             print(f"Camera 147 light records: {signal_jsonl}")
         if signal156_source:
-            signal_video, signal_jsonl = render_signal_view(signal156_source, output_dir, "156")
+            signal_video, signal_jsonl = render_signal_view(signal156_source, output_dir, "156", clock_156)
             print(f"Camera 156 light view: {signal_video}")
             print(f"Camera 156 light records: {signal_jsonl}")
 
@@ -1343,10 +1679,26 @@ def run_raw_video(
     signal147_offset: float,
     signal156_source: Path | None,
     signal156_offset: float,
+    timestamp_112: datetime | None,
+    timestamp_147: datetime | None,
+    timestamp_156: datetime | None,
     save_signal_views: bool,
 ) -> None:
     """Run raw YOLO on the full camera-112 scan ROI, then assign lane IDs."""
     output_dir.mkdir(parents=True, exist_ok=True)
+    if profile == PROFILE_KRUNG_THON:
+        clock_112, clock_source_112 = resolve_start_timestamp(source, "112", timestamp_112, output_dir)
+        clock_147, clock_source_147 = resolve_start_timestamp(signal147_source, "147", timestamp_147, output_dir)
+        clock_156, clock_source_156 = resolve_start_timestamp(signal156_source, "156", timestamp_156, output_dir)
+    else:
+        clock_112 = clock_147 = clock_156 = None
+        clock_source_112 = clock_source_147 = clock_source_156 = "disabled"
+    clock_start_sources = {"112": clock_source_112, "147": clock_source_147, "156": clock_source_156}
+    clock_start_times = {
+        "112": clock_112.isoformat(sep=" ") if clock_112 else None,
+        "147": clock_147.isoformat(sep=" ") if clock_147 else None,
+        "156": clock_156.isoformat(sep=" ") if clock_156 else None,
+    }
     apply_class_aliases(model, class_aliases)
     video_path = output_dir / f"{source.stem}_raw.mp4"
     jsonl_path = output_dir / f"{source.stem}_raw_detections.jsonl"
@@ -1393,14 +1745,26 @@ def run_raw_video(
                     verbose=False,
                 )[0]
 
-                roi_states_147 = reader_147.states_at(elapsed_seconds) if reader_147 else {}
-                roi_states_156 = reader_156.states_at(elapsed_seconds) if reader_156 else {}
-                raw_147, selected_147 = resolve_signal_roi_states(roi_states_147) if roi_states_147 else ({}, {})
-                raw_156, selected_156 = resolve_signal_roi_states(roi_states_156) if roi_states_156 else ({}, {})
-                states_147 = smoother_147.update(raw_147) if raw_147 else {}
-                states_156 = smoother_156.update(raw_156) if raw_156 else {}
-                lane_signals = fuse_lane_signals(states_147, states_156)
-                allowed_by_lane = {lane: str(summary["direction"]) for lane, summary in lane_signals.items()}
+                measurements_147 = reader_147.measurements_at(elapsed_seconds) if reader_147 else {}
+                measurements_156 = reader_156.measurements_at(elapsed_seconds) if reader_156 else {}
+                raw_147, raw_confidence_147, selected_147 = resolve_signal_roi_measurements(measurements_147) if measurements_147 else ({}, {}, {})
+                raw_156, raw_confidence_156, selected_156 = resolve_signal_roi_measurements(measurements_156) if measurements_156 else ({}, {}, {})
+                states_147, confidence_147 = smoother_147.update(raw_147, raw_confidence_147) if raw_147 else ({}, {})
+                states_156, confidence_156 = smoother_156.update(raw_156, raw_confidence_156) if raw_156 else ({}, {})
+                roi_states_147 = {lane: {name: str(value["state"]) for name, value in values.items()} for lane, values in measurements_147.items()}
+                roi_states_156 = {lane: {name: str(value["state"]) for name, value in values.items()} for lane, values in measurements_156.items()}
+                camera_times = {
+                    "112": timestamp_at(clock_112, elapsed_seconds),
+                    "147": timestamp_at(clock_147, elapsed_seconds + signal147_offset),
+                    "156": timestamp_at(clock_156, elapsed_seconds + signal156_offset),
+                }
+                schedule_by_lane = fuse_schedule_clocks(camera_times)
+                lane_signals = fuse_lane_signals(
+                    states_147, states_156, confidence_147, confidence_156, schedule_by_lane
+                )
+                allowed_by_lane = {
+                    lane: str(summary["enforcement_direction"]) for lane, summary in lane_signals.items()
+                }
 
                 writer.write(
                     annotated_frame(
@@ -1431,14 +1795,23 @@ def run_raw_video(
                     "time_seconds": round(elapsed_seconds, 3),
                     "mode": "raw_yolo_scan_roi_then_lane_assignment",
                     "camera_profile": profile,
+                    "clock_start_sources": clock_start_sources,
+                    "clock_start_times": clock_start_times,
+                    "camera_timestamps": {camera: value.isoformat(sep=" ") if value else None for camera, value in camera_times.items()},
+                    "timetable_by_lane": schedule_by_lane,
+                    "signal_147_roi_measurements": measurements_147,
                     "signal_147_roi_states": roi_states_147,
                     "signal_147_states": states_147,
+                    "signal_147_confidence": confidence_147,
                     "signal_147_selected_light_source": selected_147,
+                    "signal_156_roi_measurements": measurements_156,
                     "signal_156_roi_states": roi_states_156,
                     "signal_156_states": states_156,
+                    "signal_156_confidence": confidence_156,
                     "signal_156_selected_light_source": selected_156,
                     "lane_signal_fusion": lane_signals,
-                    "lane_directions": allowed_by_lane,
+                    "lane_directions": {lane: str(summary["direction"]) for lane, summary in lane_signals.items()},
+                    "lane_enforcement_directions": allowed_by_lane,
                     "detections_by_class": detections,
                     "detections_by_lane": detections_by_lane,
                 }
@@ -1457,11 +1830,11 @@ def run_raw_video(
     print(f"Annotated video: {video_path}")
     if save_signal_views:
         if signal147_source:
-            signal_video, signal_jsonl = render_signal_view(signal147_source, output_dir, "147")
+            signal_video, signal_jsonl = render_signal_view(signal147_source, output_dir, "147", clock_147)
             print(f"Camera 147 light view: {signal_video}")
             print(f"Camera 147 light records: {signal_jsonl}")
         if signal156_source:
-            signal_video, signal_jsonl = render_signal_view(signal156_source, output_dir, "156")
+            signal_video, signal_jsonl = render_signal_view(signal156_source, output_dir, "156", clock_156)
             print(f"Camera 156 light view: {signal_video}")
             print(f"Camera 156 light records: {signal_jsonl}")
 
@@ -1567,6 +1940,9 @@ def main() -> None:
                 args.signal_offset,
                 signal156_source,
                 args.signal156_offset,
+                args.timestamp_112,
+                args.timestamp_147,
+                args.timestamp_156,
                 save_signal_views,
             )
         else:
@@ -1591,6 +1967,9 @@ def main() -> None:
                 args.signal_offset,
                 signal156_source,
                 args.signal156_offset,
+                args.timestamp_112,
+                args.timestamp_147,
+                args.timestamp_156,
                 save_signal_views,
                 wrong_way_alerts,
             )
