@@ -48,9 +48,22 @@ TIMESTAMP_156 = None
 # ไดเรกทอรีสำหรับบันทึกไฟล์ JSONL log
 LOG_DIRECTORY = PROJECT_DIRECTORY / "runs/live_logs"
 
-# ส่งข้อมูล UDP Payload อัตโนมัติระหว่างรัน Live Tracking
-ENABLE_UDP_PAYLOAD = True
-UDP_HOST = "127.0.0.1"
-UDP_PORT = 5005
+# โหมดการส่งข้อมูล Payload ออกไปยังระบบภายนอก
+# เลือกระบุโปรโตคอลที่ต้องการรัน: "udp", "mqtt", "both", หรือ "none"
+PAYLOAD_PROTOCOL = "mqtt"  # เลือกสลับระหว่าง "udp" หรือ "mqtt" ตรงนี้ได้เลย
+
 WINDOW_SECONDS = 30.0
 USE_WALL_CLOCK_TIME = True
+
+# ตั้งค่าสำหรับ UDP
+UDP_HOST = "127.0.0.1"
+UDP_PORT = 5005
+
+# ตั้งค่าสำหรับ MQTT
+MQTT_BROKER = "broker.hivemq.com"
+MQTT_PORT = 1883
+MQTT_TOPIC = "traffic/krung_thon_bridge/summary"
+
+# ตัวแปรระบบเปิด/ปิดการทำงานอัตโนมัติตาม PAYLOAD_PROTOCOL
+ENABLE_UDP_PAYLOAD = PAYLOAD_PROTOCOL.lower() in ("udp", "both")
+ENABLE_MQTT_PAYLOAD = PAYLOAD_PROTOCOL.lower() in ("mqtt", "both")

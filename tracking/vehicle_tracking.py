@@ -1899,6 +1899,24 @@ def send_udp_payload(sock: socket.socket | None, payload: dict[str, Any], host: 
         print(f"[UDP ERROR] Could not send payload to {host}:{port}: {err}", flush=True)
 
 
+def send_mqtt_payload(client: Any, payload: dict[str, Any], topic: str) -> None:
+    if client is None:
+        return
+    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    summary = payload.get("traffic", {})
+    wrong_way = payload.get("wrong_way", {})
+    print(
+        f"\n[MQTT LIVE OUT] topic={topic} "
+        f"{payload.get('window', {}).get('start')} -> {payload.get('window', {}).get('end')} "
+        f"| vehicles={summary.get('unique_vehicle_count', 0)} wrong_way={wrong_way.get('count', 0)} bytes={len(encoded)}",
+        flush=True,
+    )
+    try:
+        client.publish(topic, encoded)
+    except Exception as err:
+        print(f"[MQTT ERROR] Could not publish payload to topic {topic}: {err}", flush=True)
+
+
 def run_live_tracking_from_settings() -> None:
     """Show the three configured cameras live and persist JSONL as frames arrive."""
     import settings
@@ -1968,13 +1986,32 @@ def run_live_tracking_from_settings() -> None:
     window_sec = float(getattr(settings, "WINDOW_SECONDS", 30.0))
     use_wall_clock = bool(getattr(settings, "USE_WALL_CLOCK_TIME", True))
 
+    enable_mqtt = bool(getattr(settings, "ENABLE_MQTT_PAYLOAD", True))
+    mqtt_broker = str(getattr(settings, "MQTT_BROKER", "broker.hivemq.com"))
+    mqtt_port = int(getattr(settings, "MQTT_PORT", 1883))
+    mqtt_topic = str(getattr(settings, "MQTT_TOPIC", "traffic/krung_thon_bridge/summary"))
+
+    mqtt_client = None
+    if enable_mqtt:
+        try:
+            import paho.mqtt.client as mqtt
+            try:
+                mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+            except AttributeError:
+                mqtt_client = mqtt.Client()
+            mqtt_client.connect(mqtt_broker, mqtt_port, 60)
+            mqtt_client.loop_start()
+        except Exception as err:
+            print(f"[MQTT WARNING] Could not initialize MQTT client ({mqtt_broker}:{mqtt_port}): {err}", flush=True)
+            mqtt_client = None
+
     aggregator = (
         TrafficWindowAggregator(
             window_seconds=window_sec,
             anchor_time=clock_112 or datetime.now(timezone.utc),
             use_wall_clock=use_wall_clock,
         )
-        if enable_udp
+        if (enable_udp or enable_mqtt)
         else None
     )
     udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) if enable_udp else None
@@ -2013,6 +2050,8 @@ def run_live_tracking_from_settings() -> None:
     print(f"JSONL logs are being written to: {session_dir}")
     if enable_udp:
         print(f"UDP Payloads are streaming live to udp://{udp_host}:{udp_port} every {window_sec}s")
+    if enable_mqtt and mqtt_client:
+        print(f"MQTT Payloads are streaming live to broker {mqtt_broker}:{mqtt_port} on topic '{mqtt_topic}'")
 
     try:
         with (
@@ -2153,9 +2192,12 @@ def run_live_tracking_from_settings() -> None:
                     "tracks_by_class": grouped,
                 }
                 append_jsonl_record(handle_112, record_112)
-                if aggregator and udp_sock:
+                if aggregator:
                     for payload in aggregator.add_frame(record_112):
-                        send_udp_payload(udp_sock, payload, udp_host, udp_port)
+                        if udp_sock:
+                            send_udp_payload(udp_sock, payload, udp_host, udp_port)
+                        if mqtt_client:
+                            send_mqtt_payload(mqtt_client, payload, mqtt_topic)
 
                 append_jsonl_record(
                     handle_147,
@@ -2205,11 +2247,27 @@ def run_live_tracking_from_settings() -> None:
                     print("Stopped by q. Earlier JSONL records have already been saved.")
                     break
     finally:
-        if aggregator and udp_sock:
-            final_payload = aggregator.flush()
-            if final_payload:
-                send_udp_payload(udp_sock, final_payload, udp_host, udp_port)
-            udp_sock.close()
+        if aggregator:
+            try:
+                final_payload = aggregator.flush()
+                if final_payload:
+                    if udp_sock:
+                        send_udp_payload(udp_sock, final_payload, udp_host, udp_port)
+                    if mqtt_client:
+                        send_mqtt_payload(mqtt_client, final_payload, mqtt_topic)
+            except Exception:
+                pass
+        if udp_sock:
+            try:
+                udp_sock.close()
+            except Exception:
+                pass
+        if mqtt_client:
+            try:
+                mqtt_client.loop_stop()
+                mqtt_client.disconnect()
+            except Exception:
+                pass
         reader_147.close()
         reader_156.close()
         cv2.destroyAllWindows()
