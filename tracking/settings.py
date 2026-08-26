@@ -19,10 +19,12 @@ CAMERA_147_SOURCE = PROJECT_DIRECTORY / "locations/krung_thon_bridge/v7/raw_time
 CAMERA_156_SOURCE = PROJECT_DIRECTORY / "locations/krung_thon_bridge/v7/raw_timestamped/krung_thon_bridge_cam156_v7_raw_timestamped_10min.mp4"
 
 # โมเดลและตัวเลือกตรวจจับ
-MODEL_PATH = PROJECT_DIRECTORY / "model/coco/yolo11m.pt"
-CONFIDENCE = 0.16
+# สามารถเลือกใช้: yolo11n.pt (เร็วลื่นที่สุด ~60FPS), yolo11s.pt (เร็วและแม่นยำ), yolo11m.pt (หนัก)
+MODEL_PATH = PROJECT_DIRECTORY / "model/coco/yolo11n.pt"
+CONFIDENCE = 0.25
 IOU = 0.30
-IMAGE_SIZE = 1280
+IMAGE_SIZE = 640
+DEVICE = "mps"  # ใช้ Apple Silicon GPU Acceleration ให้ทำงานลื่นไหลเหมือนดูวิดีโอปกติ
 TRACKER_PATH = PROJECT_DIRECTORY / "config/vehicle_bytetrack.yaml"
 
 # การแสดงผล/ตรรกะของสะพานกรุงธน

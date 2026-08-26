@@ -1996,6 +1996,7 @@ def run_live_tracking_from_settings() -> None:
         conf=float(settings.CONFIDENCE),
         iou=float(settings.IOU),
         imgsz=int(settings.IMAGE_SIZE),
+        device=str(getattr(settings, "DEVICE", "mps")),
         agnostic_nms=bool(settings.AGNOSTIC_NMS),
         save=False,
         verbose=False,
