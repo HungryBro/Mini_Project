@@ -54,6 +54,7 @@ payload_dir = PROJECT_ROOT / "payload"
 if str(payload_dir) not in sys.path:
     sys.path.insert(0, str(payload_dir))
 
+# pyrefly: ignore [missing-import]
 from traffic_payload import TrafficWindowAggregator
 
 from config.krung_thon_bridge_regions import (
