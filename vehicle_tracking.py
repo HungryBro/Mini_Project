@@ -54,6 +54,7 @@ CLASS_COLORS_BGR = {
     "bus": (0, 165, 255),
     "motorbike": (255, 0, 255),
     "motorcycle": (255, 0, 255),
+    "moto": (255, 0, 255),
     "pickup": (0, 180, 0),
     "truck": (0, 0, 255),
     "truck trailer": (0, 120, 255),
@@ -713,14 +714,24 @@ def draw_bridge_guides(
     # Keep the outer polygon as the detection filter, but show only the
     # individual lane guides so the camera-112 view stays uncluttered.
     lane_label_baseline = round(frame.shape[0] * 0.644)
+    lane_arrow_center_y = round(frame.shape[0] * 0.735)
     lane_label_font = cv2.FONT_HERSHEY_SIMPLEX
     lane_label_scale = 0.38
+    lane_guide_color = (255, 255, 255)
     for lane_name, polygon in (lane_points or {}).items():
         summary = (lane_signals or {}).get(lane_name, {})
         direction = str(summary.get("direction", "unknown"))
-        # BGR colours: green=up, red=down, yellow=no readable light.
-        color = {"up": (0, 200, 0), "down": (0, 0, 220)}.get(direction, (0, 220, 220))
-        cv2.polylines(frame, [polygon], isClosed=True, color=color, thickness=2, lineType=cv2.LINE_AA)
+        # The road guides deliberately stay neutral.  Traffic direction is
+        # conveyed by the white arrow, while green/red remain reserved for
+        # the vehicle boxes and the signal-comparison panel.
+        cv2.polylines(
+            frame,
+            [polygon],
+            isClosed=True,
+            color=lane_guide_color,
+            thickness=2,
+            lineType=cv2.LINE_AA,
+        )
         span = horizontal_polygon_span(polygon, lane_label_baseline)
         if span:
             label = f"{lane_name.replace('_', ' ')} {direction}"
@@ -734,9 +745,27 @@ def draw_bridge_guides(
                 (max(2, label_x), lane_label_baseline),
                 lane_label_font,
                 lane_label_scale,
-                color,
+                lane_guide_color,
                 1,
                 cv2.LINE_AA,
+            )
+        arrow_span = horizontal_polygon_span(polygon, lane_arrow_center_y)
+        if arrow_span and direction in {"up", "down"}:
+            arrow_x = round((arrow_span[0] + arrow_span[1]) / 2)
+            arrow_length = max(28, round(frame.shape[0] * 0.095))
+            half_length = round(arrow_length / 2)
+            if direction == "up":
+                start, end = (arrow_x, lane_arrow_center_y + half_length), (arrow_x, lane_arrow_center_y - half_length)
+            else:
+                start, end = (arrow_x, lane_arrow_center_y - half_length), (arrow_x, lane_arrow_center_y + half_length)
+            cv2.arrowedLine(
+                frame,
+                start,
+                end,
+                lane_guide_color,
+                2,
+                cv2.LINE_AA,
+                tipLength=0.32,
             )
     if lane_signals:
         # A compact comparison panel keeps all raw light states readable even
@@ -938,10 +967,12 @@ def annotated_frame(
         if alert_wrong_way:
             color = (0, 0, 255) if wrong_way else (0, 220, 0)
             display_label = label
+            text_color = (0, 0, 0)
         else:
             color_name = "car" if label in {"car", "taxi"} else label
             color = CLASS_COLORS_BGR.get(color_name, (255, 255, 255))
             display_label = f"{label} (hold)" if occluded else label
+            text_color = color
         x1, y1, x2, y2 = [int(round(value)) for value in xyxy]
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 1 if occluded else 2)
         cv2.putText(
@@ -950,7 +981,7 @@ def annotated_frame(
             (x1, max(22, y1 - 8)),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.55 if occluded else 0.65,
-            color,
+            text_color,
             1 if occluded else 2,
             cv2.LINE_AA,
         )
@@ -1467,6 +1498,10 @@ def main() -> None:
         class_aliases["taxi"] = "car"
     if args.merge_car_like:
         class_aliases.update({"taxi": "car", "van": "car", "pickup": "car"})
+    if profile == PROFILE_KRUNG_THON:
+        # Keep the model's COCO class ID/name for inference, but use the
+        # shorter project label in the rendered video and JSON records.
+        class_aliases.setdefault("motorcycle", "moto")
     if args.source.is_dir():
         images = sorted(path for path in args.source.iterdir() if path.suffix.lower() in IMAGE_SUFFIXES)
         if not images:
