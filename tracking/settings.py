@@ -1,0 +1,47 @@
+"""แก้เฉพาะไฟล์นี้เพื่อเลือกว่า live view จะใช้คลิปใดของกล้อง 112, 147 และ 156.
+
+หลังแก้พาธแล้ว เปิด Terminal ในโฟลเดอร์ tracking และรัน:
+    python3 vehicle_tracking.py
+
+กด q ขณะหน้าต่างวิดีโอเปิดอยู่เพื่อหยุดทันที. ระบบจะไม่บันทึก MP4 แต่จะ
+เขียน JSONL ต่อเนื่องลงใน LOG_DIRECTORY ระหว่างที่กำลังแสดงผล.
+"""
+
+from pathlib import Path
+
+
+TRACKING_DIRECTORY = Path(__file__).resolve().parent
+PROJECT_DIRECTORY = TRACKING_DIRECTORY.parent
+
+# เลือกคลิปของแต่ละกล้องตรงนี้ได้เลย. ค่าเริ่มต้นเป็นชุด 10 นาทีล่าสุด.
+CAMERA_112_SOURCE = PROJECT_DIRECTORY / "locations/krung_thon_bridge/v7/raw_timestamped/krung_thon_bridge_cam112_v7_raw_timestamped_10min.mp4"
+CAMERA_147_SOURCE = PROJECT_DIRECTORY / "locations/krung_thon_bridge/v7/raw_timestamped/krung_thon_bridge_cam147_v7_raw_timestamped_10min.mp4"
+CAMERA_156_SOURCE = PROJECT_DIRECTORY / "locations/krung_thon_bridge/v7/raw_timestamped/krung_thon_bridge_cam156_v7_raw_timestamped_10min.mp4"
+
+# โมเดลและตัวเลือกตรวจจับ
+MODEL_PATH = PROJECT_DIRECTORY / "model/coco/yolo11m.pt"
+CONFIDENCE = 0.16
+IOU = 0.30
+IMAGE_SIZE = 1280
+TRACKER_PATH = PROJECT_DIRECTORY / "config/vehicle_bytetrack.yaml"
+
+# การแสดงผล/ตรรกะของสะพานกรุงธน
+PROFILE = "krung_thon_bridge"
+BRIDGE_ONLY = True
+SHOW_LANES = True
+SHOW_GATES = False
+AGNOSTIC_NMS = True
+WRONG_WAY_ALERTS = True
+OCCLUSION_HOLD = 8
+MAX_HELD_TRACKS = 3
+SIGNAL_147_OFFSET_SECONDS = 0.0
+SIGNAL_156_OFFSET_SECONDS = 0.0
+
+# ใช้ None เพื่อให้อ่านเวลา OSD บนคลิปอัตโนมัติ. หาก OCR อ่านไม่ได้ สามารถ
+# กำหนดสตริง ISO (เช่น "2026-08-26 07:47:28") ได้ที่นี่
+TIMESTAMP_112 = None
+TIMESTAMP_147 = None
+TIMESTAMP_156 = None
+
+# ไดเรกทอรีสำหรับบันทึกไฟล์ JSONL log
+LOG_DIRECTORY = PROJECT_DIRECTORY / "runs/live_logs"

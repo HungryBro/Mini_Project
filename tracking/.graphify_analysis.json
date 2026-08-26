@@ -1,0 +1,304 @@
+{
+  "communities": {
+    "0": [
+      "bool",
+      "float",
+      "int",
+      "ndarray",
+      "object",
+      "tracking_vehicle_tracking_annotated_frame",
+      "tracking_vehicle_tracking_box_is_inside_lanes",
+      "tracking_vehicle_tracking_box_is_inside_roi",
+      "tracking_vehicle_tracking_classify_signal_measurement",
+      "tracking_vehicle_tracking_classify_signal_state",
+      "tracking_vehicle_tracking_draw_bridge_guides",
+      "tracking_vehicle_tracking_draw_text_panel",
+      "tracking_vehicle_tracking_gate_endpoints",
+      "tracking_vehicle_tracking_grouped_detection",
+      "tracking_vehicle_tracking_horizontal_polygon_span",
+      "tracking_vehicle_tracking_point_is_inside_roi",
+      "tracking_vehicle_tracking_rationale_1236",
+      "tracking_vehicle_tracking_rationale_537",
+      "tracking_vehicle_tracking_rationale_575",
+      "tracking_vehicle_tracking_rationale_718",
+      "tracking_vehicle_tracking_rationale_726",
+      "tracking_vehicle_tracking_rationale_817",
+      "tracking_vehicle_tracking_rationale_896",
+      "tracking_vehicle_tracking_rationale_912",
+      "tracking_vehicle_tracking_rationale_934",
+      "tracking_vehicle_tracking_rationale_966",
+      "tracking_vehicle_tracking_stabilized_tracks"
+    ],
+    "1": [
+      "tracking_vehicle_tracking_apply_class_aliases",
+      "tracking_vehicle_tracking_bridge_roi",
+      "tracking_vehicle_tracking_lane_rois",
+      "tracking_vehicle_tracking_main",
+      "tracking_vehicle_tracking_rationale_1206",
+      "tracking_vehicle_tracking_rationale_123",
+      "tracking_vehicle_tracking_rationale_1298",
+      "tracking_vehicle_tracking_rationale_1687",
+      "tracking_vehicle_tracking_rationale_295",
+      "tracking_vehicle_tracking_rationale_580",
+      "tracking_vehicle_tracking_rationale_613",
+      "tracking_vehicle_tracking_rationale_674",
+      "tracking_vehicle_tracking_render_signal_view",
+      "tracking_vehicle_tracking_resolve_signal_roi_measurements",
+      "tracking_vehicle_tracking_run_image",
+      "tracking_vehicle_tracking_run_raw_video",
+      "tracking_vehicle_tracking_run_video",
+      "tracking_vehicle_tracking_signalstatesmoother",
+      "tracking_vehicle_tracking_signalstatesmoother_init",
+      "tracking_vehicle_tracking_signalstatesmoother_update",
+      "tracking_vehicle_tracking_signalvideoreader",
+      "tracking_vehicle_tracking_signalvideoreader_close",
+      "tracking_vehicle_tracking_signalvideoreader_measurements_at",
+      "tracking_vehicle_tracking_signalvideoreader_states_at",
+      "tracking_vehicle_tracking_timestamp_at",
+      "tracking_vehicle_tracking_vehicle_class_map",
+      "yolo"
+    ],
+    "2": [
+      "graphify_detect_json",
+      "tracking_graphify_detect_files",
+      "tracking_graphify_detect_files_code",
+      "tracking_graphify_detect_files_document",
+      "tracking_graphify_detect_files_image",
+      "tracking_graphify_detect_files_paper",
+      "tracking_graphify_detect_files_video",
+      "tracking_graphify_detect_graphifyignore_patterns",
+      "tracking_graphify_detect_needs_graph",
+      "tracking_graphify_detect_scan_root",
+      "tracking_graphify_detect_skipped_sensitive",
+      "tracking_graphify_detect_total_files",
+      "tracking_graphify_detect_total_words",
+      "tracking_graphify_detect_warning"
+    ],
+    "3": [
+      "namespace",
+      "path",
+      "tracking_vehicle_tracking_default_signal156_source",
+      "tracking_vehicle_tracking_default_signal_source",
+      "tracking_vehicle_tracking_parse_args",
+      "tracking_vehicle_tracking_rationale_272",
+      "tracking_vehicle_tracking_rationale_279",
+      "tracking_vehicle_tracking_rationale_287",
+      "tracking_vehicle_tracking_resolve_profile",
+      "tracking_vehicle_tracking_signalvideoreader_init"
+    ],
+    "4": [
+      "datetime",
+      "tracking_vehicle_tracking_draw_signal_guides",
+      "tracking_vehicle_tracking_fuse_schedule_clocks",
+      "tracking_vehicle_tracking_rationale_1071",
+      "tracking_vehicle_tracking_rationale_312",
+      "tracking_vehicle_tracking_rationale_323",
+      "tracking_vehicle_tracking_timetable_directions"
+    ],
+    "5": [
+      "str",
+      "tracking_vehicle_tracking_classify_signal_roi_measurements",
+      "tracking_vehicle_tracking_classify_signal_roi_states",
+      "tracking_vehicle_tracking_rationale_658",
+      "tracking_vehicle_tracking_rationale_666",
+      "tracking_vehicle_tracking_signal_rois_for_camera"
+    ],
+    "6": [
+      "tracking_vehicle_tracking_clock_crop",
+      "tracking_vehicle_tracking_parse_clock_timestamp",
+      "tracking_vehicle_tracking_rationale_112",
+      "tracking_vehicle_tracking_rationale_368",
+      "tracking_vehicle_tracking_rationale_376",
+      "tracking_vehicle_tracking_read_timestamp_from_frame"
+    ],
+    "7": [
+      "tracking_vehicle_tracking_detections_grouped_by_lane",
+      "tracking_vehicle_tracking_rationale_1",
+      "tracking_vehicle_tracking_rationale_1187",
+      "tracking_vehicle_tracking_rationale_708",
+      "tracking_vehicle_tracking_resolve_signal_roi_states",
+      "vehicle_tracking_py"
+    ],
+    "8": [
+      "tracking_vehicle_tracking_rationale_750",
+      "tracking_vehicle_tracking_rationale_763",
+      "tracking_vehicle_tracking_rationale_790",
+      "tracking_vehicle_tracking_track_directions",
+      "tracking_vehicle_tracking_trackstate",
+      "tracking_vehicle_tracking_wrong_way_track_ids"
+    ],
+    "9": [
+      "tracking_vehicle_tracking_fuse_lane_signals",
+      "tracking_vehicle_tracking_rationale_456",
+      "tracking_vehicle_tracking_rationale_482",
+      "tracking_vehicle_tracking_visual_signal_decision"
+    ],
+    "10": [
+      "tracking_vehicle_tracking_allowed_direction",
+      "tracking_vehicle_tracking_direction_from_signal",
+      "tracking_vehicle_tracking_rationale_440",
+      "tracking_vehicle_tracking_rationale_449"
+    ],
+    "11": [
+      "tracking_vehicle_tracking_rationale_418",
+      "tracking_vehicle_tracking_rationale_430",
+      "tracking_vehicle_tracking_read_video_start_timestamp",
+      "tracking_vehicle_tracking_resolve_start_timestamp"
+    ],
+    "12": [
+      "tracking_vehicle_tracking_mask_outside_roi",
+      "tracking_vehicle_tracking_rationale_734"
+    ]
+  },
+  "cohesion": {
+    "0": 0.1737891737891738,
+    "1": 0.16524216524216523,
+    "2": 0.14285714285714285,
+    "3": 0.2,
+    "4": 0.38095238095238093,
+    "5": 0.4666666666666667,
+    "6": 0.3333333333333333,
+    "7": 0.3333333333333333,
+    "8": 0.3333333333333333,
+    "9": 0.5,
+    "10": 0.5,
+    "11": 0.5,
+    "12": 1.0
+  },
+  "gods": [
+    {
+      "id": "str",
+      "label": "str",
+      "degree": 43
+    },
+    {
+      "id": "tracking_vehicle_tracking_run_video",
+      "label": "run_video()",
+      "degree": 28
+    },
+    {
+      "id": "tracking_vehicle_tracking_run_raw_video",
+      "label": "run_raw_video()",
+      "degree": 28
+    },
+    {
+      "id": "ndarray",
+      "label": "ndarray",
+      "degree": 22
+    },
+    {
+      "id": "float",
+      "label": "float",
+      "degree": 20
+    },
+    {
+      "id": "tracking_vehicle_tracking_run_image",
+      "label": "run_image()",
+      "degree": 18
+    },
+    {
+      "id": "int",
+      "label": "int",
+      "degree": 15
+    },
+    {
+      "id": "tracking_vehicle_tracking_render_signal_view",
+      "label": "render_signal_view()",
+      "degree": 15
+    },
+    {
+      "id": "tracking_vehicle_tracking_annotated_frame",
+      "label": "annotated_frame()",
+      "degree": 14
+    },
+    {
+      "id": "datetime",
+      "label": "datetime",
+      "degree": 12
+    }
+  ],
+  "surprises": [
+    {
+      "source": "parse_clock_timestamp()",
+      "target": "str",
+      "source_files": [
+        "vehicle_tracking.py",
+        "vehicle_tracking.py"
+      ],
+      "confidence": "EXTRACTED",
+      "relation": "references",
+      "note": "Bridges community 6 \u2192 community 5"
+    },
+    {
+      "source": "parse_clock_timestamp()",
+      "target": "datetime",
+      "source_files": [
+        "vehicle_tracking.py",
+        "vehicle_tracking.py"
+      ],
+      "confidence": "EXTRACTED",
+      "relation": "references",
+      "note": "Bridges community 6 \u2192 community 4"
+    },
+    {
+      "source": "vehicle_class_map()",
+      "target": "str",
+      "source_files": [
+        "vehicle_tracking.py",
+        "vehicle_tracking.py"
+      ],
+      "confidence": "EXTRACTED",
+      "relation": "calls",
+      "note": "Bridges community 5 \u2192 community 1"
+    },
+    {
+      "source": "resolve_profile()",
+      "target": "str",
+      "source_files": [
+        "vehicle_tracking.py",
+        "vehicle_tracking.py"
+      ],
+      "confidence": "EXTRACTED",
+      "relation": "calls",
+      "note": "Bridges community 5 \u2192 community 3"
+    },
+    {
+      "source": "timetable_directions()",
+      "target": "str",
+      "source_files": [
+        "vehicle_tracking.py",
+        "vehicle_tracking.py"
+      ],
+      "confidence": "EXTRACTED",
+      "relation": "references",
+      "note": "Bridges community 5 \u2192 community 4"
+    }
+  ],
+  "questions": [
+    {
+      "type": "bridge_node",
+      "question": "Why does `str` connect `Community 5` to `Community 0`, `Community 1`, `Community 3`, `Community 4`, `Community 6`, `Community 7`, `Community 8`, `Community 9`, `Community 10`, `Community 11`?",
+      "why": "High betweenness centrality (0.169) - this node is a cross-community bridge."
+    },
+    {
+      "type": "bridge_node",
+      "question": "Why does `run_raw_video()` connect `Community 1` to `Community 0`, `Community 3`, `Community 4`, `Community 5`, `Community 7`, `Community 9`, `Community 11`, `Community 12`?",
+      "why": "High betweenness centrality (0.052) - this node is a cross-community bridge."
+    },
+    {
+      "type": "bridge_node",
+      "question": "Why does `run_video()` connect `Community 1` to `Community 0`, `Community 3`, `Community 4`, `Community 5`, `Community 7`, `Community 8`, `Community 9`, `Community 11`?",
+      "why": "High betweenness centrality (0.039) - this node is a cross-community bridge."
+    },
+    {
+      "type": "isolated_nodes",
+      "question": "What connects `code`, `document`, `paper` to the rest of the system?",
+      "why": "55 weakly-connected nodes found - possible documentation gaps or missing edges."
+    },
+    {
+      "type": "low_cohesion",
+      "question": "Should `Community 2` be split into smaller, more focused modules?",
+      "why": "Cohesion score 0.14285714285714285 - nodes in this community are weakly interconnected."
+    }
+  ]
+}

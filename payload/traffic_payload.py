@@ -15,9 +15,13 @@ from typing import Any
 
 
 VEHICLE_TYPE_ALIASES = {
-    "moto": "motorcycle",
-    "motorbike": "motorcycle",
-    "truck trailer": "truck",
+    "moto": "motor",
+    "motorbike": "motor",
+    "motorcycle": "motor",
+    "truck trailer": "car",
+    "bus": "car",
+    "truck": "car",
+    "car": "car",
 }
 
 
@@ -38,14 +42,16 @@ def iso_time(anchor: datetime, source_seconds: float) -> str:
 
 def normalize_vehicle_type(value: object) -> str:
     label = str(value).strip().lower()
-    return VEHICLE_TYPE_ALIASES.get(label, label or "unknown")
+    return VEHICLE_TYPE_ALIASES.get(
+        label, "motor" if label in ("moto", "motorbike", "motorcycle", "motor") else "car"
+    )
 
 
 @dataclass
 class TrafficWindowAggregator:
     """Accumulate tracker records and emit one normalized payload per window."""
 
-    window_seconds: float = 60.0
+    window_seconds: float = 30.0
     camera_id: str = "CAM_112"
     site_id: str = "krung_thon_bridge"
     site_name: str = "Krung Thon Bridge"
@@ -104,8 +110,6 @@ class TrafficWindowAggregator:
         window_end = self._last_time
         counts = Counter(self._vehicles.values())
         payload = {
-            "schema_version": "traffic.v1",
-            "message_type": "traffic_summary",
             "timestamp": iso_time(self.anchor_time, window_end),
             "timestamp_unix": int((self.anchor_time + timedelta(seconds=window_end)).timestamp()),
             "window": {
@@ -117,27 +121,50 @@ class TrafficWindowAggregator:
             "location": {
                 "site_id": self.site_id,
                 "site_name": self.site_name,
-                "camera_id": self.camera_id,
-                "camera_name": self.camera_name,
             },
             "camera_profile": self._camera_profile,
-            "signals": {
-                "camera_147": self._signals_147,
-                "camera_156": self._signals_156,
-            },
             "lanes": self._lanes,
             "traffic": {
                 "unique_vehicle_count": len(self._vehicles),
-                "vehicles_by_type": dict(sorted(counts.items())),
-                "sample_count": self._samples,
+                "vehicles_by_type": {
+                    "car": counts.get("car", 0),
+                    "motor": counts.get("motor", 0),
+                },
             },
-            "wrong_way": {
-                "count": len(self._wrong_way_events),
-                "events": list(self._wrong_way_events.values()),
-            },
+            "wrong_way": self._wrong_way_summary(),
         }
         self._reset_window()
         return payload
+
+    def _wrong_way_summary(self) -> dict[str, Any]:
+        by_lane: dict[str, dict[str, Any]] = {}
+        for event in self._wrong_way_events.values():
+            lane_id = str(event.get("lane_id") or "unknown")
+            if lane_id not in by_lane:
+                by_lane[lane_id] = {
+                    "count": 0,
+                    "car": 0,
+                    "motor": 0,
+                    "direction": event.get("direction", "unknown"),
+                    "expected_direction": event.get("expected_direction", "unknown"),
+                }
+            by_lane[lane_id]["count"] += 1
+            v_type = event.get("vehicle_type", "car")
+            if v_type == "motor":
+                by_lane[lane_id]["motor"] += 1
+            else:
+                by_lane[lane_id]["car"] += 1
+
+            if by_lane[lane_id]["direction"] == "unknown" and event.get("direction") != "unknown":
+                by_lane[lane_id]["direction"] = event["direction"]
+            if by_lane[lane_id]["expected_direction"] == "unknown" and event.get("expected_direction") != "unknown":
+                by_lane[lane_id]["expected_direction"] = event["expected_direction"]
+
+        sorted_by_lane = {k: by_lane[k] for k in sorted(by_lane.keys())}
+        return {
+            "count": len(self._wrong_way_events),
+            "by_lane": sorted_by_lane,
+        }
 
     def _record_wrong_way(
         self,
@@ -177,8 +204,6 @@ class TrafficWindowAggregator:
                 continue
             lanes[str(lane)] = {
                 "last_direction": state.get("direction", "unknown"),
-                "source": state.get("source", "none"),
-                "agrees": state.get("agrees"),
             }
         return lanes
 

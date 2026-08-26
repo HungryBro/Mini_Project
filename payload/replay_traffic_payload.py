@@ -12,7 +12,16 @@ from typing import Any
 from traffic_payload import TrafficWindowAggregator, parse_start_time
 
 
-DEFAULT_INPUT = Path("runs/krung_thon_bridge/v2/v2_wrong_way_coco/krung_thon_bridge_cam112_v2_1min_tracks.jsonl")
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = next(
+    (
+        candidate
+        for candidate in (SCRIPT_DIR, *SCRIPT_DIR.parents)
+        if (candidate / "runs" / "krung_thon_bridge").is_dir()
+    ),
+    SCRIPT_DIR,
+)
+DEFAULT_INPUT = PROJECT_ROOT / "runs/krung_thon_bridge/v2/v2_wrong_way_coco/krung_thon_bridge_cam112_v2_1min_tracks.jsonl"
 
 
 def parse_args() -> argparse.Namespace:
@@ -20,7 +29,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input", type=Path, default=DEFAULT_INPUT, help="vehicle_tracking JSONL input")
     parser.add_argument("--host", default="127.0.0.1", help="UDP receiver host")
     parser.add_argument("--port", type=int, default=5005, help="UDP receiver port")
-    parser.add_argument("--window-seconds", type=float, default=60.0, help="source-time aggregation window")
+    parser.add_argument("--window-seconds", type=float, default=30.0, help="source-time aggregation window")
     parser.add_argument("--site-id", default="krung_thon_bridge")
     parser.add_argument("--site-name", default="Krung Thon Bridge")
     parser.add_argument("--camera-id", default="CAM_112")
@@ -41,8 +50,9 @@ def send_payload(sock: socket.socket, payload: dict[str, Any], host: str, port: 
     summary = payload["traffic"]
     wrong_way = payload["wrong_way"]
     action = "DRY RUN" if dry_run else "UDP OUT"
+    site_label = location.get("camera_id", location.get("site_id", "site"))
     print(
-        f"[{action}] {location['camera_id']} {payload['window']['start']} -> {payload['window']['end']} "
+        f"[{action}] {site_label} {payload['window']['start']} -> {payload['window']['end']} "
         f"| vehicles={summary['unique_vehicle_count']} wrong_way={wrong_way['count']} bytes={len(encoded)}"
     )
     print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -52,8 +62,13 @@ def send_payload(sock: socket.socket, payload: dict[str, Any], host: str, port: 
 
 def main() -> None:
     args = parse_args()
-    if not args.input.is_file():
-        raise SystemExit(f"Input JSONL not found: {args.input}")
+    input_path = args.input
+    if not input_path.is_absolute() and not input_path.is_file():
+        project_relative = PROJECT_ROOT / input_path
+        if project_relative.is_file():
+            input_path = project_relative
+    if not input_path.is_file():
+        raise SystemExit(f"Input JSONL not found: {input_path}")
     if args.window_seconds <= 0:
         raise SystemExit("--window-seconds must be greater than zero")
     if args.send_delay < 0:
@@ -69,14 +84,14 @@ def main() -> None:
     )
     frames = 0
     sent = 0
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock, args.input.open("r", encoding="utf-8") as handle:
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock, input_path.open("r", encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, start=1):
             if not line.strip():
                 continue
             try:
                 record = json.loads(line)
             except json.JSONDecodeError as error:
-                raise SystemExit(f"Invalid JSON at {args.input}:{line_number}: {error.msg}") from error
+                raise SystemExit(f"Invalid JSON at {input_path}:{line_number}: {error.msg}") from error
             frames += 1
             for payload in aggregator.add_frame(record):
                 send_payload(sock, payload, args.host, args.port, args.dry_run)
