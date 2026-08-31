@@ -1,4 +1,4 @@
-"""แก้เฉพาะไฟล์นี้เพื่อเลือกว่า live view จะใช้คลิปใดของกล้อง 112, 147 และ 156.
+"""ตั้งค่า live view v2 ที่ใช้กล้อง 112 เพียงกล้องเดียว.
 
 หลังแก้พาธแล้ว เปิด Terminal ในโฟลเดอร์ tracking และรัน:
     python3 vehicle_tracking.py
@@ -14,27 +14,19 @@ TRACKING_DIRECTORY = Path(__file__).resolve().parent
 PROJECT_DIRECTORY = TRACKING_DIRECTORY.parent
 
 # โหมดแหล่งข้อมูลวิดีโอ ("video_files" หรือ "live_stream")
-SOURCE_MODE = "live_stream"  # เปลี่ยนเป็น "live_stream" เพื่อดึงภาพกล้องสดจากลิงก์ URL , video_files 
+SOURCE_MODE = "live_stream"  # เปลี่ยนเป็น "live_stream" เพื่อใช้ "video_files" เมื่อต้องการทดสอบจากคลิปในเครื่อง 
 
-# ลิงก์สตรีมสด HLS (.m3u8) ของแต่ละกล้อง
+# ลิงก์สตรีมสด HLS (.m3u8) ของกล้อง 112
 CAMERA_112_STREAM_URL = "https://drr-kt-svr02.enixma.net/live/192.168.8.112.stream/playlist.m3u8"
-CAMERA_147_STREAM_URL = "https://drr-kt-svr02.enixma.net/live/192.168.8.147.stream/playlist.m3u8"
-CAMERA_156_STREAM_URL = "https://drr-kt-svr02.enixma.net/live/192.168.8.156.stream/playlist.m3u8"
 
 # คลิปวิดีโอไฟล์ในเครื่องสำหรับทดสอบ
 CAMERA_112_FILE = PROJECT_DIRECTORY / "locations/krung_thon_bridge/v2_have_wrrongway/krung_thon_bridge_cam112_v2_1min.mp4"
-CAMERA_147_FILE = PROJECT_DIRECTORY / "locations/krung_thon_bridge/v2_have_wrrongway/krung_thon_bridge_cam147_v2_1min.mp4"
-CAMERA_156_FILE = PROJECT_DIRECTORY / "locations/krung_thon_bridge/v2_have_wrrongway/krung_thon_bridge_cam156_v2_1min.mp4"
 
 # สวิตช์สลับแหล่งข้อมูลวิดีโอตาม SOURCE_MODE
 if str(SOURCE_MODE).lower() in ("live_stream", "stream", "url", "live"):
     CAMERA_112_SOURCE = CAMERA_112_STREAM_URL
-    CAMERA_147_SOURCE = CAMERA_147_STREAM_URL
-    CAMERA_156_SOURCE = CAMERA_156_STREAM_URL
 else:
     CAMERA_112_SOURCE = CAMERA_112_FILE
-    CAMERA_147_SOURCE = CAMERA_147_FILE
-    CAMERA_156_SOURCE = CAMERA_156_FILE
 
 # โมเดลและตัวเลือกตรวจจับ
 # สามารถเลือกใช้: yolo11n.pt (เร็วลื่นที่สุด ~60FPS), yolo11s.pt (เร็วและแม่นยำสูง), yolo11m.pt (หนัก)
@@ -54,14 +46,14 @@ AGNOSTIC_NMS = True
 WRONG_WAY_ALERTS = True
 OCCLUSION_HOLD = 8
 MAX_HELD_TRACKS = 3
-SIGNAL_147_OFFSET_SECONDS = 0.0
-SIGNAL_156_OFFSET_SECONDS = 0.0
 
 # ใช้ None เพื่อให้อ่านเวลา OSD บนภาพวิดีโอ/สตรีมให้อัตโนมัติ
 # หากวิดีโอไม่มีข้อความเวลา หรือต้องการระบุเวลาเริ่มต้นเอง สามารถใส่สตริง เช่น "2026-08-26 07:47:28" ได้
 TIMESTAMP_112 = None
-TIMESTAMP_147 = None
-TIMESTAMP_156 = None
+
+# ถ้า OCR เวลาในกล้อง 112 ไม่ได้ ให้ใช้เวลาปัจจุบันของเครื่อง (เวลาไทย)
+# เพื่อเลือกตารางเลนแทน. False = ระบุทิศทางเป็น unknown เพื่อความปลอดภัย.
+USE_SYSTEM_CLOCK_IF_112_TIME_UNAVAILABLE = True
 
 # ไดเรกทอรีสำหรับบันทึกไฟล์ JSONL log
 LOG_DIRECTORY = PROJECT_DIRECTORY / "runs/live_logs"
