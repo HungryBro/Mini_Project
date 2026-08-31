@@ -13,15 +13,33 @@ from pathlib import Path
 TRACKING_DIRECTORY = Path(__file__).resolve().parent
 PROJECT_DIRECTORY = TRACKING_DIRECTORY.parent
 
-# เลือกคลิปของแต่ละกล้องตรงนี้ได้เลย. ค่าเริ่มต้นเป็นชุด 10 นาทีล่าสุด.
-CAMERA_112_SOURCE = PROJECT_DIRECTORY / "locations/krung_thon_bridge/v7/raw_timestamped/krung_thon_bridge_cam112_v7_raw_timestamped_10min.mp4"
-CAMERA_147_SOURCE = PROJECT_DIRECTORY / "locations/krung_thon_bridge/v7/raw_timestamped/krung_thon_bridge_cam147_v7_raw_timestamped_10min.mp4"
-CAMERA_156_SOURCE = PROJECT_DIRECTORY / "locations/krung_thon_bridge/v7/raw_timestamped/krung_thon_bridge_cam156_v7_raw_timestamped_10min.mp4"
+# โหมดแหล่งข้อมูลวิดีโอ ("video_files" หรือ "live_stream")
+SOURCE_MODE = "live_stream"  # เปลี่ยนเป็น "live_stream" เพื่อดึงภาพกล้องสดจากลิงก์ URL , video_files 
+
+# ลิงก์สตรีมสด HLS (.m3u8) ของแต่ละกล้อง
+CAMERA_112_STREAM_URL = "https://drr-kt-svr02.enixma.net/live/192.168.8.112.stream/playlist.m3u8"
+CAMERA_147_STREAM_URL = "https://drr-kt-svr02.enixma.net/live/192.168.8.147.stream/playlist.m3u8"
+CAMERA_156_STREAM_URL = "https://drr-kt-svr02.enixma.net/live/192.168.8.156.stream/playlist.m3u8"
+
+# คลิปวิดีโอไฟล์ในเครื่องสำหรับทดสอบ
+CAMERA_112_FILE = PROJECT_DIRECTORY / "locations/krung_thon_bridge/v2_have_wrrongway/krung_thon_bridge_cam112_v2_1min.mp4"
+CAMERA_147_FILE = PROJECT_DIRECTORY / "locations/krung_thon_bridge/v2_have_wrrongway/krung_thon_bridge_cam147_v2_1min.mp4"
+CAMERA_156_FILE = PROJECT_DIRECTORY / "locations/krung_thon_bridge/v2_have_wrrongway/krung_thon_bridge_cam156_v2_1min.mp4"
+
+# สวิตช์สลับแหล่งข้อมูลวิดีโอตาม SOURCE_MODE
+if str(SOURCE_MODE).lower() in ("live_stream", "stream", "url", "live"):
+    CAMERA_112_SOURCE = CAMERA_112_STREAM_URL
+    CAMERA_147_SOURCE = CAMERA_147_STREAM_URL
+    CAMERA_156_SOURCE = CAMERA_156_STREAM_URL
+else:
+    CAMERA_112_SOURCE = CAMERA_112_FILE
+    CAMERA_147_SOURCE = CAMERA_147_FILE
+    CAMERA_156_SOURCE = CAMERA_156_FILE
 
 # โมเดลและตัวเลือกตรวจจับ
-# สามารถเลือกใช้: yolo11n.pt (เร็วลื่นที่สุด ~60FPS), yolo11s.pt (เร็วและแม่นยำ), yolo11m.pt (หนัก)
-MODEL_PATH = PROJECT_DIRECTORY / "model/coco/yolo11n.pt"
-CONFIDENCE = 0.25
+# สามารถเลือกใช้: yolo11n.pt (เร็วลื่นที่สุด ~60FPS), yolo11s.pt (เร็วและแม่นยำสูง), yolo11m.pt (หนัก)
+MODEL_PATH = PROJECT_DIRECTORY / "model/coco/yolo11s.pt"
+CONFIDENCE = 0.35
 IOU = 0.30
 IMAGE_SIZE = 640
 DEVICE = "mps"  # ใช้ Apple Silicon GPU Acceleration ให้ทำงานลื่นไหลเหมือนดูวิดีโอปกติ
@@ -39,8 +57,8 @@ MAX_HELD_TRACKS = 3
 SIGNAL_147_OFFSET_SECONDS = 0.0
 SIGNAL_156_OFFSET_SECONDS = 0.0
 
-# ใช้ None เพื่อให้อ่านเวลา OSD บนคลิปอัตโนมัติ. หาก OCR อ่านไม่ได้ สามารถ
-# กำหนดสตริง ISO (เช่น "2026-08-26 07:47:28") ได้ที่นี่
+# ใช้ None เพื่อให้อ่านเวลา OSD บนภาพวิดีโอ/สตรีมให้อัตโนมัติ
+# หากวิดีโอไม่มีข้อความเวลา หรือต้องการระบุเวลาเริ่มต้นเอง สามารถใส่สตริง เช่น "2026-08-26 07:47:28" ได้
 TIMESTAMP_112 = None
 TIMESTAMP_147 = None
 TIMESTAMP_156 = None
@@ -53,7 +71,8 @@ LOG_DIRECTORY = PROJECT_DIRECTORY / "runs/live_logs"
 PAYLOAD_PROTOCOL = "mqtt"  # เลือกสลับระหว่าง "udp" หรือ "mqtt" ตรงนี้ได้เลย
 
 WINDOW_SECONDS = 30.0
-USE_WALL_CLOCK_TIME = True
+# สลับใช้ Wall-clock time อัตโนมัติ: True เมื่อรันกล้องสด (live_stream) และ False เมื่อรันไฟล์คลิปวิดีโอ
+USE_WALL_CLOCK_TIME = str(SOURCE_MODE).lower() in ("live_stream", "stream", "url", "live")
 
 # ตั้งค่าสำหรับ UDP
 UDP_HOST = "127.0.0.1"

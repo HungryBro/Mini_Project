@@ -40,8 +40,12 @@ from typing import Any
 import cv2
 # pyrefly: ignore [missing-import]
 import numpy as np
+import logging
 # pyrefly: ignore [missing-import]
 from ultralytics import YOLO
+from ultralytics.utils import LOGGER
+
+LOGGER.setLevel(logging.ERROR)
 
 
 # ``tracking`` is intentionally runnable as its own working folder.  Keep the
@@ -338,7 +342,7 @@ def lane_rois(frame, profile: str) -> dict[str, np.ndarray] | None:
 def timetable_directions(timestamp: datetime | None) -> tuple[dict[str, str] | None, str | None]:
     """Return the daily timetable direction map at one camera timestamp."""
     if timestamp is None:
-        return None, None
+        timestamp = datetime.now().astimezone()
     now = timestamp.time()
     for period, windows, directions in KRUNG_THON_TIMETABLE:
         if any(start <= now < end for start, end in windows):
@@ -560,8 +564,10 @@ def fuse_lane_signals(
     return fused
 
 
-def classify_signal_measurement(frame: np.ndarray, polygon: np.ndarray) -> dict[str, object]:
+def classify_signal_measurement(frame: np.ndarray | None, polygon: np.ndarray) -> dict[str, object]:
     """Classify one LED ROI and quantify how clearly its colour is visible."""
+    if frame is None or frame.size == 0:
+        return {"state": "unknown", "confidence": 0.0}
     mask = np.zeros(frame.shape[:2], dtype=np.uint8)
     cv2.fillPoly(mask, [polygon.astype(np.int32)], 255)
     mask[:2] = 0
@@ -637,31 +643,52 @@ class SignalStateSmoother:
 
 
 class SignalVideoReader:
-    """Read one signal-camera stream by elapsed camera-112 time."""
+    """Read one signal-camera stream by elapsed camera-112 time or live stream via background thread."""
 
-    def __init__(self, source: Path, camera: str, offset_seconds: float = 0.0):
-        self.source = source
+    def __init__(self, source: Path | str, camera: str, offset_seconds: float = 0.0):
+        import threading
+        self.source = str(source)
         self.camera = camera
         self.offset_seconds = offset_seconds
-        self.capture = cv2.VideoCapture(str(source))
+        self.is_stream = self.source.startswith(("http://", "https://", "rtsp://", "rtmp://"))
+        self.capture = cv2.VideoCapture(self.source)
         if not self.capture.isOpened():
             raise SystemExit(f"Could not open signal video: {source}")
         self.fps = self.capture.get(cv2.CAP_PROP_FPS) or 25.0
+        if self.fps <= 0 or self.fps > 120:
+            self.fps = 25.0
         self.next_frame = 0
         self.last_frame: np.ndarray | None = None
+        self.running = True
+
+        if self.is_stream:
+            self.thread = threading.Thread(target=self._update_stream, daemon=True)
+            self.thread.start()
+
+    def _update_stream(self) -> None:
+        import time
+        while self.running and self.capture and self.capture.isOpened():
+            if self.capture.grab():
+                ok, frame = self.capture.retrieve()
+                if ok and frame is not None and frame.size > 0:
+                    self.last_frame = frame
+            else:
+                time.sleep(0.01)
 
     def measurements_at(self, elapsed_seconds: float) -> dict[str, dict[str, dict[str, object]]]:
-        target = max(0, round((elapsed_seconds + self.offset_seconds) * self.fps))
-        if target < self.next_frame:
-            self.capture.set(cv2.CAP_PROP_POS_FRAMES, target)
-            self.next_frame = target
-        while self.next_frame <= target:
-            ok, frame = self.capture.read()
-            if not ok:
-                break
-            self.last_frame = frame
-            self.next_frame += 1
-        if self.last_frame is None:
+        if not self.is_stream:
+            target = max(0, round((elapsed_seconds + self.offset_seconds) * self.fps))
+            if target < self.next_frame:
+                self.capture.set(cv2.CAP_PROP_POS_FRAMES, target)
+                self.next_frame = target
+            while self.next_frame <= target:
+                ok, frame = self.capture.read()
+                if not ok:
+                    break
+                self.last_frame = frame
+                self.next_frame += 1
+
+        if self.last_frame is None or self.last_frame.size == 0:
             return {f"lane_{index}": {"primary": {"state": "unknown", "confidence": 0.0}} for index in range(1, 5)}
         return classify_signal_roi_measurements(self.last_frame, self.camera)
 
@@ -670,7 +697,9 @@ class SignalVideoReader:
         return {lane: {name: str(value["state"]) for name, value in roi_set.items()} for lane, roi_set in measurements.items()}
 
     def close(self) -> None:
-        self.capture.release()
+        self.running = False
+        if self.capture:
+            self.capture.release()
 
 
 def signal_rois_for_camera(frame: np.ndarray, camera: str) -> dict[str, dict[str, np.ndarray]]:
@@ -989,10 +1018,14 @@ def draw_bridge_guides(
     show_gates: bool,
     lane_points: dict[str, np.ndarray] | None = None,
     lane_signals: dict[str, dict[str, object]] | None = None,
+    camera_timestamp: datetime | None = None,
 ) -> None:
     """Draw the selected ROI, fused lane directions, and optional Taksin gates."""
-    # Keep the outer polygon as the detection filter, but show only the
-    # individual lane guides so the camera-112 view stays uncluttered.
+    h_frame, w_frame = frame.shape[:2]
+    # Samsen (Bottom) & Bang Phlat (Top) orientation labels
+    cv2.putText(frame, "<- Bang Phlat ->", (round(w_frame * 0.39), 24), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 2, cv2.LINE_AA)
+    cv2.putText(frame, "<- Samsen ->", (round(w_frame * 0.41), h_frame - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 2, cv2.LINE_AA)
+
     lane_label_baseline = round(frame.shape[0] * 0.644)
     lane_arrow_center_y = round(frame.shape[0] * 0.735)
     lane_label_font = cv2.FONT_HERSHEY_SIMPLEX
@@ -1001,9 +1034,6 @@ def draw_bridge_guides(
     for lane_name, polygon in (lane_points or {}).items():
         summary = (lane_signals or {}).get(lane_name, {})
         direction = str(summary.get("direction", "unknown"))
-        # The road guides deliberately stay neutral.  Traffic direction is
-        # conveyed by the white arrow, while green/red remain reserved for
-        # the vehicle boxes and the signal-comparison panel.
         cv2.polylines(
             frame,
             [polygon],
@@ -1048,9 +1078,12 @@ def draw_bridge_guides(
                 tipLength=0.32,
             )
     if lane_signals:
-        # A compact comparison panel keeps all raw light states readable even
-        # when the four lane polygons converge at the far end of the bridge.
-        panel_lines: list[tuple[str, tuple[int, int, int]]] = []
+        if camera_timestamp is None:
+            camera_timestamp = datetime.now().astimezone()
+        time_str = camera_timestamp.strftime("%Y-%m-%d %H:%M:%S")
+        panel_lines: list[tuple[str, tuple[int, int, int]]] = [
+            (f"TIME: {time_str}", (255, 255, 255))
+        ]
         for index in range(1, 5):
             lane = f"lane_{index}"
             summary = lane_signals.get(lane, {})
@@ -1069,8 +1102,6 @@ def draw_bridge_guides(
                 "schedule_conflict_safe": "safe conflict",
             }.get(source, "unknown")
             color = {"up": (0, 220, 0), "down": (0, 0, 255)}.get(direction, (0, 220, 220))
-            # Two short rows per lane keep the panel entirely in the right-side
-            # margin instead of spanning into the road and vehicle tracks.
             panel_lines.extend((
                 (f"L{index} {direction.upper()} | {source_label}", color),
                 (f"V:{visual_confidence:.2f} 147:{light_147} 156:{light_156} S:{schedule_direction} {schedule_confidence:.2f}", color),
@@ -1259,11 +1290,12 @@ def annotated_frame(
     alert_wrong_way: bool = False,
     wrong_way_ids: set[int] | None = None,
     source_frame: np.ndarray | None = None,
+    camera_timestamp: datetime | None = None,
 ) -> object:
     """Render boxes and optionally highlight tracked wrong-way vehicles."""
     frame = (source_frame if source_frame is not None else result.orig_img).copy()
     if roi_points is not None:
-        draw_bridge_guides(frame, roi_points, show_gates, lane_points, lane_signals)
+        draw_bridge_guides(frame, roi_points, show_gates, lane_points, lane_signals, camera_timestamp=camera_timestamp)
     boxes = result.boxes
     class_aliases = class_aliases or {}
     label_overrides = label_overrides or {}
@@ -1917,24 +1949,34 @@ def send_mqtt_payload(client: Any, payload: dict[str, Any], topic: str) -> None:
         print(f"[MQTT ERROR] Could not publish payload to topic {topic}: {err}", flush=True)
 
 
+def _is_url(val: object) -> bool:
+    s = str(val).strip().lower()
+    return s.startswith(("http://", "https://", "rtsp://", "rtmp://"))
+
+
 def run_live_tracking_from_settings() -> None:
     """Show the three configured cameras live and persist JSONL as frames arrive."""
     import settings
 
-    source = Path(settings.CAMERA_112_SOURCE).expanduser()
-    signal147_source = Path(settings.CAMERA_147_SOURCE).expanduser()
-    signal156_source = Path(settings.CAMERA_156_SOURCE).expanduser()
+    source_val = getattr(settings, "CAMERA_112_SOURCE", "")
+    signal147_val = getattr(settings, "CAMERA_147_SOURCE", "")
+    signal156_val = getattr(settings, "CAMERA_156_SOURCE", "")
+
+    source = str(source_val) if _is_url(source_val) else Path(source_val).expanduser()
+    signal147_source = str(signal147_val) if _is_url(signal147_val) else Path(signal147_val).expanduser()
+    signal156_source = str(signal156_val) if _is_url(signal156_val) else Path(signal156_val).expanduser()
+
     model_path = Path(settings.MODEL_PATH).expanduser()
-    required_files = {
-        "Camera 112 video": source,
-        "Camera 147 video": signal147_source,
-        "Camera 156 video": signal156_source,
-        "YOLO model": model_path,
-        "ByteTrack configuration": Path(settings.TRACKER_PATH).expanduser(),
-    }
-    for label, path in required_files.items():
-        if not path.exists():
-            raise SystemExit(f"{label} not found: {path}\nEdit tracking/settings.py and try again.")
+    tracker_path = Path(settings.TRACKER_PATH).expanduser()
+
+    if not model_path.exists():
+        raise SystemExit(f"YOLO model not found: {model_path}\nEdit tracking/settings.py and try again.")
+    if not tracker_path.exists():
+        raise SystemExit(f"ByteTrack configuration not found: {tracker_path}\nEdit tracking/settings.py and try again.")
+
+    for label, src in [("Camera 112 video", source), ("Camera 147 video", signal147_source), ("Camera 156 video", signal156_source)]:
+        if not _is_url(src) and isinstance(src, Path) and not src.exists():
+            raise SystemExit(f"{label} not found: {src}\nEdit tracking/settings.py and try again.")
 
     profile = str(settings.PROFILE)
     if profile not in {PROFILE_TAKSIN, PROFILE_KRUNG_THON}:
@@ -1953,15 +1995,23 @@ def run_live_tracking_from_settings() -> None:
     log_root = Path(settings.LOG_DIRECTORY).expanduser()
     session_dir = log_root / datetime.now().strftime("live_%Y%m%d_%H%M%S")
     session_dir.mkdir(parents=True, exist_ok=True)
-    log_112 = session_dir / f"{source.stem}_camera112.jsonl"
-    log_147 = session_dir / f"{signal147_source.stem}_camera147.jsonl"
-    log_156 = session_dir / f"{signal156_source.stem}_camera156.jsonl"
+    stem_112 = "live_stream_112" if _is_url(source) else source.stem
+    stem_147 = "live_stream_147" if _is_url(signal147_source) else signal147_source.stem
+    stem_156 = "live_stream_156" if _is_url(signal156_source) else signal156_source.stem
+
+    log_112 = session_dir / f"{stem_112}_camera112.jsonl"
+    log_147 = session_dir / f"{stem_147}_camera147.jsonl"
+    log_156 = session_dir / f"{stem_156}_camera156.jsonl"
 
     capture = cv2.VideoCapture(str(source))
     if not capture.isOpened():
-        raise SystemExit(f"Could not open camera 112 video: {source}")
+        raise SystemExit(f"Could not open camera 112 video source: {source}")
     fps = capture.get(cv2.CAP_PROP_FPS) or 25.0
+    if fps <= 0 or fps > 120:
+        fps = 25.0
     total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+    if total_frames <= 0:
+        total_frames = 999999
     capture.release()
 
     clock_112, clock_source_112 = resolve_start_timestamp(
@@ -2025,20 +2075,24 @@ def run_live_tracking_from_settings() -> None:
     smoother_147 = SignalStateSmoother()
     smoother_156 = SignalStateSmoother()
     track_memory: dict[int, TrackState] = {}
-    results = model.track(
-        source=str(source),
-        stream=True,
-        persist=True,
-        tracker=str(settings.TRACKER_PATH),
-        classes=list(class_map),
-        conf=float(settings.CONFIDENCE),
-        iou=float(settings.IOU),
-        imgsz=int(settings.IMAGE_SIZE),
-        device=str(getattr(settings, "DEVICE", "mps")),
-        agnostic_nms=bool(settings.AGNOSTIC_NMS),
-        save=False,
-        verbose=False,
-    )
+    track_kwargs: dict[str, Any] = {
+        "source": str(source),
+        "stream": True,
+        "persist": True,
+        "tracker": str(settings.TRACKER_PATH),
+        "classes": list(class_map),
+        "conf": float(settings.CONFIDENCE),
+        "iou": float(settings.IOU),
+        "imgsz": int(settings.IMAGE_SIZE),
+        "device": str(getattr(settings, "DEVICE", "mps")),
+        "agnostic_nms": bool(settings.AGNOSTIC_NMS),
+        "save": False,
+        "verbose": False,
+    }
+    if _is_url(source):
+        track_kwargs["stream_buffer"] = True
+
+    results = model.track(**track_kwargs)
 
     window_112 = "Camera 112 - Vehicle tracking"
     window_147 = "Camera 147 - Traffic lights"
@@ -2127,6 +2181,7 @@ def run_live_tracking_from_settings() -> None:
                     lane_filter_points=lane_filter_points,
                     alert_wrong_way=bool(settings.WRONG_WAY_ALERTS),
                     wrong_way_ids=violations,
+                    camera_timestamp=camera_times.get("112"),
                 )
                 camera147_view = reader_147.last_frame.copy()
                 camera156_view = reader_156.last_frame.copy()
