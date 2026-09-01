@@ -33,7 +33,7 @@ else:
 
 # โมเดลและตัวเลือกตรวจจับ
 # สามารถเลือกใช้: yolo11n.pt (เร็วลื่นที่สุด ~60FPS), yolo11s.pt (เร็วและแม่นยำสูง), yolo11m.pt (หนัก)
-MODEL_PATH = PROJECT_DIRECTORY / "model/coco/yolo11s.pt"
+MODEL_PATH = PROJECT_DIRECTORY / "model/thai_cars_gpu/weights/best.pt"
 CONFIDENCE = 0.35
 IOU = 0.30
 IMAGE_SIZE = 640

@@ -74,8 +74,8 @@ GATE_B_NORMALIZED = (0.394, 0.771)
 PROFILE_TAKSIN = "taksin"
 PROFILE_KRUNG_THON = "krung_thon_bridge"
 KRUNG_THON_TIMETABLE = (
-    ("morning", ((time(5, 30), time(7, 30)), (time(8, 20), time(8, 45))), ("up", "up", "up", "down")),
-    ("evening", ((time(15, 30), time(16, 30)), (time(17, 0), time(17, 45)), (time(18, 15), time(20, 30))), ("up", "down", "down", "down")),
+    ("morning", ((time(5, 30), time(7, 30)), (time(8, 20), time(8, 45))), ("up", "down", "down", "down")),
+    ("evening", ((time(15, 30), time(16, 30)), (time(17, 0), time(17, 45)), (time(18, 15), time(20, 30))), ("up", "up", "up", "down")),
 )
 KRUNG_THON_DEFAULT_DIRECTIONS = ("up", "up", "down", "down")
 
