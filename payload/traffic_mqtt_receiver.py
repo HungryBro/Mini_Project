@@ -14,10 +14,10 @@ except ImportError:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Receive traffic.v1 JSON payloads over MQTT")
-    parser.add_argument("--broker", default="broker.hivemq.com", help="MQTT broker host")
+    parser.add_argument("--broker", default="172.16.2.117", help="MQTT broker host")
     parser.add_argument("--port", type=int, default=1883, help="MQTT broker port")
     parser.add_argument(
-        "--topic", default="traffic/krung_thon_bridge/summary", help="MQTT topic to subscribe"
+        "--topic", default="traffic/krung_thon_bridge/CAM_112/summary", help="MQTT topic to subscribe"
     )
     parser.add_argument("--once", action="store_true", help="stop after the first valid payload")
     return parser.parse_args()
@@ -30,7 +30,7 @@ def print_payload(payload: dict[str, Any], topic: str, byte_count: int, broker: 
     print(
         f"[MQTT IN] broker={broker} | topic={topic} | {byte_count} bytes | "
         f"{location.get('site_id', 'unknown')} | "
-        f"vehicles={traffic.get('unique_vehicle_count', 0)} wrong_way={wrong_way.get('count', 0)}"
+        f"vehicles={traffic.get('vehicle_count', 0)} wrong_way={wrong_way.get('count', 0)}"
     )
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 

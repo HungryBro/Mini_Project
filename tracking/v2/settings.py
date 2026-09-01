@@ -82,7 +82,10 @@ LIVE_RECORDING_FPS_FALLBACK = 25.0
 # เลือกระบุโปรโตคอลที่ต้องการรัน: "udp", "mqtt", "both", หรือ "none"
 PAYLOAD_PROTOCOL = "mqtt"  # เลือกสลับระหว่าง "udp" หรือ "mqtt" ตรงนี้ได้เลย
 
-WINDOW_SECONDS = 30.0
+# The Mac gateway receives a local summary every minute, then sends a combined
+# summary to the cloud MQTT broker every five minutes.
+GATEWAY_WINDOW_SECONDS = 60.0
+BROKER_WINDOW_SECONDS = 300.0
 # สลับใช้ Wall-clock time อัตโนมัติ: True เมื่อรันกล้องสด (live_stream) และ False เมื่อรันไฟล์คลิปวิดีโอ
 USE_WALL_CLOCK_TIME = str(SOURCE_MODE).lower() in ("live_stream", "stream", "url", "live")
 
@@ -91,9 +94,11 @@ UDP_HOST = "127.0.0.1"
 UDP_PORT = 5005
 
 # ตั้งค่าสำหรับ MQTT
-MQTT_BROKER = "broker.hivemq.com"
+MQTT_BROKER = "172.16.2.117"
 MQTT_PORT = 1883
-MQTT_TOPIC = "traffic/krung_thon_bridge/summary"
+MQTT_TOPIC = "traffic/krung_thon_bridge/CAM_112/summary"
+MQTT_CLIENT_ID = "vehicle_gateway_CAM_112"
+MQTT_QOS = 1
 
 # ตัวแปรระบบเปิด/ปิดการทำงานอัตโนมัติตาม PAYLOAD_PROTOCOL
 ENABLE_UDP_PAYLOAD = PAYLOAD_PROTOCOL.lower() in ("udp", "both")

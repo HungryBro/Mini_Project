@@ -46,7 +46,7 @@ if str(payload_dir) not in sys.path:
     sys.path.insert(0, str(payload_dir))
 
 # pyrefly: ignore [missing-import]
-from traffic_payload import TrafficWindowAggregator
+from traffic_payload import TrafficGatewayAggregator, TrafficWindowAggregator
 from config.krung_thon_bridge_regions import camera_112_lane_rois, camera_112_roi, point_lane
 
 VEHICLE_NAMES = {
@@ -834,7 +834,7 @@ def send_udp_payload(sock: socket.socket | None, payload: dict[str, Any], host: 
     except Exception as err:
         print(f"[UDP ERROR] Could not send payload to {host}:{port}: {err}", flush=True)
 
-def send_mqtt_payload(client: Any, payload: dict[str, Any], topic: str) -> None:
+def send_mqtt_payload(client: Any, payload: dict[str, Any], topic: str, qos: int = 1) -> None:
     if client is None:
         return
     encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -843,11 +843,11 @@ def send_mqtt_payload(client: Any, payload: dict[str, Any], topic: str) -> None:
     print(
         f"\n[MQTT LIVE OUT] topic={topic} "
         f"{payload.get('window', {}).get('start')} -> {payload.get('window', {}).get('end')} "
-        f"| vehicles={summary.get('unique_vehicle_count', 0)} wrong_way={wrong_way.get('count', 0)} bytes={len(encoded)}",
+        f"| vehicles={summary.get('vehicle_count', 0)} wrong_way={wrong_way.get('count', 0)} bytes={len(encoded)}",
         flush=True,
     )
     try:
-        client.publish(topic, encoded)
+        client.publish(topic, encoded, qos=qos, retain=False)
     except Exception as err:
         print(f"[MQTT ERROR] Could not publish payload to topic {topic}: {err}", flush=True)
 
@@ -958,7 +958,8 @@ def run_v2_single_camera_from_settings() -> None:
     enable_mqtt = bool(getattr(settings, "ENABLE_MQTT_PAYLOAD", False))
     udp_host = str(getattr(settings, "UDP_HOST", "127.0.0.1"))
     udp_port = int(getattr(settings, "UDP_PORT", 5005))
-    window_seconds = float(getattr(settings, "WINDOW_SECONDS", 30.0))
+    gateway_window_seconds = float(getattr(settings, "GATEWAY_WINDOW_SECONDS", 60.0))
+    broker_window_seconds = float(getattr(settings, "BROKER_WINDOW_SECONDS", 300.0))
     use_wall_clock = bool(getattr(settings, "USE_WALL_CLOCK_TIME", _is_url(source)))
 
     mqtt_client = None
@@ -967,9 +968,14 @@ def run_v2_single_camera_from_settings() -> None:
             import paho.mqtt.client as mqtt
 
             try:
-                mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+                mqtt_client = mqtt.Client(
+                    client_id=str(getattr(settings, "MQTT_CLIENT_ID", "vehicle_gateway_CAM_112")),
+                    callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
+                )
             except AttributeError:
-                mqtt_client = mqtt.Client()
+                mqtt_client = mqtt.Client(
+                    client_id=str(getattr(settings, "MQTT_CLIENT_ID", "vehicle_gateway_CAM_112"))
+                )
             mqtt_client.connect(
                 str(getattr(settings, "MQTT_BROKER", "broker.hivemq.com")),
                 int(getattr(settings, "MQTT_PORT", 1883)),
@@ -980,16 +986,39 @@ def run_v2_single_camera_from_settings() -> None:
             print(f"[MQTT WARNING] Could not initialize MQTT: {err}", flush=True)
             mqtt_client = None
 
-    aggregator = (
+    gateway_input_aggregator = (
         TrafficWindowAggregator(
-            window_seconds=window_seconds,
+            window_seconds=gateway_window_seconds,
             anchor_time=clock_112 or datetime.now(BANGKOK_TIMEZONE),
             use_wall_clock=use_wall_clock,
         )
         if enable_udp or enable_mqtt
         else None
     )
+    broker_aggregator = (
+        TrafficGatewayAggregator(window_seconds=broker_window_seconds) if enable_mqtt else None
+    )
     udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) if enable_udp else None
+
+    def forward_gateway_payload(gateway_payload: dict[str, Any]) -> None:
+        """Accept one local one-minute payload, then publish only five-minute cloud summaries."""
+        window = gateway_payload.get("window", {})
+        print(
+            f"[GATEWAY IN] {window.get('start')} -> {window.get('end')} "
+            f"| vehicles={gateway_payload.get('traffic', {}).get('vehicle_count', 0)} "
+            f"wrong_way={gateway_payload.get('wrong_way', {}).get('count', 0)}",
+            flush=True,
+        )
+        if udp_sock:
+            send_udp_payload(udp_sock, gateway_payload, udp_host, udp_port)
+        if broker_aggregator and mqtt_client:
+            for cloud_payload in broker_aggregator.add_payload(gateway_payload):
+                send_mqtt_payload(
+                    mqtt_client,
+                    cloud_payload,
+                    str(getattr(settings, "MQTT_TOPIC", "traffic/krung_thon_bridge/CAM_112/summary")),
+                    int(getattr(settings, "MQTT_QOS", 1)),
+                )
 
     track_kwargs: dict[str, Any] = {
         "source": str(source),
@@ -1157,16 +1186,9 @@ def run_v2_single_camera_from_settings() -> None:
                 }
                 append_jsonl_record(handle_112, record_112)
 
-                if aggregator:
-                    for payload in aggregator.add_frame(record_112):
-                        if udp_sock:
-                            send_udp_payload(udp_sock, payload, udp_host, udp_port)
-                        if mqtt_client:
-                            send_mqtt_payload(
-                                mqtt_client,
-                                payload,
-                                str(getattr(settings, "MQTT_TOPIC", "traffic/krung_thon_bridge/summary")),
-                            )
+                if gateway_input_aggregator:
+                    for gateway_payload in gateway_input_aggregator.add_frame(record_112):
+                        forward_gateway_payload(gateway_payload)
 
                 if frame_number % 100 == 0:
                     progress = f"{frame_number + 1}/{total_frames}" if total_frames > 0 else str(frame_number + 1)
@@ -1175,17 +1197,19 @@ def run_v2_single_camera_from_settings() -> None:
                     print("Stopped by q. Earlier MP4 frames and JSONL records have already been saved.")
                     break
     finally:
-        if aggregator:
-            final_payload = aggregator.flush()
-            if final_payload:
-                if udp_sock:
-                    send_udp_payload(udp_sock, final_payload, udp_host, udp_port)
-                if mqtt_client:
-                    send_mqtt_payload(
-                        mqtt_client,
-                        final_payload,
-                        str(getattr(settings, "MQTT_TOPIC", "traffic/krung_thon_bridge/summary")),
-                    )
+        if gateway_input_aggregator:
+            final_gateway_payload = gateway_input_aggregator.flush(complete_window=False)
+            if final_gateway_payload:
+                forward_gateway_payload(final_gateway_payload)
+        if broker_aggregator and mqtt_client:
+            final_cloud_payload = broker_aggregator.flush(complete_window=False)
+            if final_cloud_payload:
+                send_mqtt_payload(
+                    mqtt_client,
+                    final_cloud_payload,
+                    str(getattr(settings, "MQTT_TOPIC", "traffic/krung_thon_bridge/CAM_112/summary")),
+                    int(getattr(settings, "MQTT_QOS", 1)),
+                )
         if udp_sock:
             udp_sock.close()
         if mqtt_client:
