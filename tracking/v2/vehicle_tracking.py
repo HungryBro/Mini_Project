@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import re
 import socket
 import subprocess
@@ -215,10 +216,12 @@ def point_is_inside_roi(bottom_center: tuple[float, float], roi_points: np.ndarr
         return True
     return cv2.pointPolygonTest(roi_points.astype(np.float32), bottom_center, False) >= 0
 
+@dataclass
 class TrackState:
-    """Small display cache used while ByteTrack temporarily loses a detection."""
+    """State retained across short ByteTrack ID changes and occlusions."""
 
-    label: str
+    vehicle_id: str
+    home_lane_id: str | None
     bbox_xyxy: list[float]
     center: tuple[float, float]
     velocity: tuple[float, float]
@@ -226,6 +229,86 @@ class TrackState:
     observations: int
     confidence: float
     vertical_motion: deque[float] = field(default_factory=lambda: deque(maxlen=10))
+    wrong_way_consecutive: int = 0
+    wrong_way_event_id: str | None = None
+
+
+def _bbox_iou(first: list[float], second: list[float]) -> float:
+    """Return overlap between two boxes for conservative ID re-association."""
+    left = max(first[0], second[0])
+    top = max(first[1], second[1])
+    right = min(first[2], second[2])
+    bottom = min(first[3], second[3])
+    intersection = max(0.0, right - left) * max(0.0, bottom - top)
+    if intersection <= 0:
+        return 0.0
+    first_area = max(0.0, first[2] - first[0]) * max(0.0, first[3] - first[1])
+    second_area = max(0.0, second[2] - second[0]) * max(0.0, second[3] - second[1])
+    union = first_area + second_area - intersection
+    return intersection / union if union > 0 else 0.0
+
+
+def _predicted_box(state: TrackState, missed_frames: int) -> list[float]:
+    dx = state.velocity[0] * missed_frames
+    dy = state.velocity[1] * missed_frames
+    x1, y1, x2, y2 = state.bbox_xyxy
+    return [x1 + dx, y1 + dy, x2 + dx, y2 + dy]
+
+
+def _next_vehicle_id(lane_id: str | None, lane_counters: dict[str, int]) -> str:
+    """Create a human-readable lane-local ID, for example ``L2-V004``."""
+    lane_key = lane_id or "lane_unknown"
+    lane_counters[lane_key] += 1
+    lane_number = re.search(r"(\d+)$", lane_key)
+    prefix = f"L{lane_number.group(1)}" if lane_number else "LX"
+    return f"{prefix}-V{lane_counters[lane_key]:03d}"
+
+
+def _reassociate_previous_track(
+    memory: dict[int, TrackState],
+    seen_ids: set[int],
+    bbox_xyxy: list[float],
+    center: tuple[float, float],
+    lane_id: str | None,
+    frame_number: int,
+    max_gap_frames: int,
+    max_center_distance: float,
+    min_iou: float,
+) -> int | None:
+    """Find a recently lost same-lane track that most likely is this vehicle.
+
+    This needs temporal proximity and geometric agreement.  Lane membership on
+    its own is never enough, which prevents merging two following vehicles.
+    """
+    candidates: list[tuple[float, int]] = []
+    for prior_track_id, state in memory.items():
+        if prior_track_id in seen_ids:
+            continue
+        missed_frames = frame_number - state.last_seen_frame
+        if missed_frames <= 0 or missed_frames > max_gap_frames:
+            continue
+        if lane_id and state.home_lane_id and lane_id != state.home_lane_id:
+            continue
+        predicted = _predicted_box(state, missed_frames)
+        predicted_center = (
+            (predicted[0] + predicted[2]) / 2,
+            (predicted[1] + predicted[3]) / 2,
+        )
+        distance = math.dist(center, predicted_center)
+        speed = math.hypot(*state.velocity)
+        allowed_distance = max_center_distance + min(max_center_distance, speed * missed_frames)
+        overlap = _bbox_iou(bbox_xyxy, predicted)
+        if distance > allowed_distance or (overlap < min_iou and distance > allowed_distance * 0.55):
+            continue
+        score = (overlap * 2.0) + max(0.0, 1.0 - distance / max(allowed_distance, 1.0))
+        candidates.append((score, prior_track_id))
+    return max(candidates)[1] if candidates else None
+
+
+def track_vehicle_ids(track_memory: dict[int, TrackState]) -> dict[int, str]:
+    """Map temporary ByteTrack IDs to V2's stable lane-local vehicle IDs."""
+    return {track_id: state.vehicle_id for track_id, state in track_memory.items()}
+
 
 def track_directions(track_memory: dict[int, TrackState]) -> dict[int, str]:
     """Classify the recent vertical motion of confirmed ByteTrack objects.
@@ -248,13 +331,22 @@ def track_directions(track_memory: dict[int, TrackState]) -> dict[int, str]:
             directions[track_id] = "unknown"
     return directions
 
-def wrong_way_track_ids(
+
+def confirmed_wrong_way_track_ids(
     track_memory: dict[int, TrackState],
     directions: dict[int, str],
     lane_points: dict[str, np.ndarray] | None,
     allowed_by_lane: dict[str, str],
+    frame_number: int,
+    confirm_frames: int,
+    min_displacement_pixels: float,
 ) -> set[int]:
-    """Return only tracks moving opposite to a readable lane direction."""
+    """Confirm sustained wrong-way movement before a one-time event is emitted.
+
+    A vehicle may have started driving the wrong way before it entered the
+    camera view.  Once this camera sees enough opposite motion, it receives one
+    event ID based on its stable vehicle ID—not on ByteTrack's temporary number.
+    """
     violations: set[int] = set()
     if not lane_points:
         return violations
@@ -265,7 +357,24 @@ def wrong_way_track_ids(
         x1, _y1, x2, y2 = state.bbox_xyxy
         lane_id = point_lane(((x1 + x2) / 2, y2), lane_points)
         expected = allowed_by_lane.get(lane_id, "unknown") if lane_id else "unknown"
-        if direction in {"up", "down"} and expected in {"up", "down"} and direction != expected:
+        moving_wrong_way = (
+            direction in {"up", "down"}
+            and expected in {"up", "down"}
+            and direction != expected
+        )
+        # A predicted/held box cannot add confirmation frames by itself.
+        if state.last_seen_frame == frame_number:
+            state.wrong_way_consecutive = (
+                state.wrong_way_consecutive + 1 if moving_wrong_way else 0
+            )
+        vertical_displacement = abs(sum(state.vertical_motion))
+        if (
+            moving_wrong_way
+            and state.wrong_way_consecutive >= confirm_frames
+            and vertical_displacement >= min_displacement_pixels
+        ):
+            if state.wrong_way_event_id is None:
+                state.wrong_way_event_id = f"WW-{state.vehicle_id}"
             violations.add(track_id)
     return violations
 
@@ -279,8 +388,12 @@ def stabilized_tracks(
     frame_number: int,
     hold_frames: int,
     max_held_tracks: int,
-) -> tuple[dict[int, str], list[dict[str, object]]]:
-    """Lock a track's first label and briefly predict its box during occlusion."""
+    lane_counters: dict[str, int],
+    reassociate_gap_frames: int,
+    reassociate_max_distance: float,
+    reassociate_min_iou: float,
+) -> tuple[dict[int, str], list[dict[str, object]], dict[int, str]]:
+    """Label every detection as vehicle and retain that ID across short losses."""
     label_overrides: dict[int, str] = {}
     seen_ids: set[int] = set()
     boxes = result.boxes
@@ -296,12 +409,43 @@ def stabilized_tracks(
                 continue
             xyxy = [float(value) for value in box.xyxy[0].cpu().tolist()]
             center = ((xyxy[0] + xyxy[2]) / 2, (xyxy[1] + xyxy[3]) / 2)
-            raw_label = class_aliases.get(class_map[class_id], class_map[class_id])
+            lane_id = point_lane((center[0], xyxy[3]), lane_points) if lane_points else None
             confidence = float(box.conf.item())
             state = memory.get(track_id)
             if state is None:
-                state = TrackState(raw_label, xyxy, center, (0.0, 0.0), frame_number, 1, confidence)
-                memory[track_id] = state
+                prior_track_id = _reassociate_previous_track(
+                    memory,
+                    seen_ids,
+                    xyxy,
+                    center,
+                    lane_id,
+                    frame_number,
+                    reassociate_gap_frames,
+                    reassociate_max_distance,
+                    reassociate_min_iou,
+                )
+                if prior_track_id is not None:
+                    state = memory.pop(prior_track_id)
+                    memory[track_id] = state
+                    state.velocity = (center[0] - state.center[0], center[1] - state.center[1])
+                    state.vertical_motion.append(state.velocity[1])
+                    state.bbox_xyxy = xyxy
+                    state.center = center
+                    state.last_seen_frame = frame_number
+                    state.observations += 1
+                    state.confidence = confidence
+                else:
+                    state = TrackState(
+                        vehicle_id=_next_vehicle_id(lane_id, lane_counters),
+                        home_lane_id=lane_id,
+                        bbox_xyxy=xyxy,
+                        center=center,
+                        velocity=(0.0, 0.0),
+                        last_seen_frame=frame_number,
+                        observations=1,
+                        confidence=confidence,
+                    )
+                    memory[track_id] = state
             else:
                 state.velocity = (center[0] - state.center[0], center[1] - state.center[1])
                 state.vertical_motion.append(state.velocity[1])
@@ -310,9 +454,9 @@ def stabilized_tracks(
                 state.last_seen_frame = frame_number
                 state.observations += 1
                 state.confidence = confidence
-            # Keep the first stable track label so it does not flicker between
-            # bus/truck or motorcycle/car as detections vary frame to frame.
-            label_overrides[track_id] = state.label
+            if state.home_lane_id is None and lane_id:
+                state.home_lane_id = lane_id
+            label_overrides[track_id] = f"vehicle {state.vehicle_id}"
             seen_ids.add(track_id)
 
     retained_candidates: list[tuple[int, int, float, dict[str, object]]] = []
@@ -324,13 +468,12 @@ def stabilized_tracks(
         # A one-frame false positive must disappear immediately rather than
         # creating a long-lived ghost box.  Confirm real tracks first.
         if missed_frames <= hold_frames and state.observations >= 5 and state.confidence >= 0.50:
-            dx, dy = state.velocity[0] * missed_frames, state.velocity[1] * missed_frames
-            x1, y1, x2, y2 = state.bbox_xyxy
+            x1, y1, x2, y2 = _predicted_box(state, missed_frames)
             predicted = [
-                max(0.0, min(frame_width - 1.0, x1 + dx)),
-                max(0.0, min(frame_height - 1.0, y1 + dy)),
-                max(0.0, min(frame_width - 1.0, x2 + dx)),
-                max(0.0, min(frame_height - 1.0, y2 + dy)),
+                max(0.0, min(frame_width - 1.0, x1)),
+                max(0.0, min(frame_height - 1.0, y1)),
+                max(0.0, min(frame_width - 1.0, x2)),
+                max(0.0, min(frame_height - 1.0, y2)),
             ]
             bottom_center = ((predicted[0] + predicted[2]) / 2, predicted[3])
             if point_is_inside_roi(bottom_center, roi_points):
@@ -341,7 +484,9 @@ def stabilized_tracks(
                         state.confidence,
                         {
                             "track_id": track_id,
-                            "label": state.label,
+                            "vehicle_id": state.vehicle_id,
+                            "wrong_way_event_id": state.wrong_way_event_id,
+                            "label": f"vehicle {state.vehicle_id}",
                             "bbox_xyxy": predicted,
                             "bottom_center": bottom_center,
                         },
@@ -351,11 +496,9 @@ def stabilized_tracks(
         # display data forever after an object has left the scene.
         if missed_frames > max(hold_frames, 90):
             del memory[track_id]
-    # Prefer confirmed, recently observed, high-confidence tracks.  This avoids
-    # filling a busy scene with stale boxes when several vehicles overlap.
     retained_candidates.sort(key=lambda item: item[:3], reverse=True)
     retained_tracks = [item[3] for item in retained_candidates[:max_held_tracks]]
-    return label_overrides, retained_tracks
+    return label_overrides, retained_tracks, track_vehicle_ids(memory)
 
 def gate_endpoints(roi_points: np.ndarray, y_normalized: float, frame_height: int) -> tuple[tuple[int, int], tuple[int, int]]:
     """Intersect a horizontal gate at ``y_normalized`` with the bridge polygon."""
@@ -479,24 +622,64 @@ def grouped_detection(
     require_lane_membership: bool = True,
     direction_by_track: dict[int, str] | None = None,
     allowed_by_lane: dict[str, str] | None = None,
+    vehicle_ids: dict[int, str] | None = None,
+    wrong_way_ids: set[int] | None = None,
+    wrong_way_event_ids: dict[int, str] | None = None,
 ) -> dict[str, list[dict]]:
+    """Write a single ``vehicle`` class while retaining lane-local IDs."""
     grouped: dict[str, list[dict]] = defaultdict(list)
     boxes = result.boxes
-    class_aliases = class_aliases or {}
-    label_overrides = label_overrides or {}
     direction_by_track = direction_by_track or {}
     allowed_by_lane = allowed_by_lane or {}
+    vehicle_ids = vehicle_ids or {}
+    wrong_way_ids = wrong_way_ids or set()
+    wrong_way_event_ids = wrong_way_event_ids or {}
 
     def movement_fields(bottom_center: list[float], track_id: int | None) -> dict[str, object]:
         lane_id = point_lane((bottom_center[0], bottom_center[1]), lane_points) if lane_points else None
         direction = direction_by_track.get(track_id) if track_id is not None else None
         expected = allowed_by_lane.get(lane_id, "unknown") if lane_id else "unknown"
+        wrong_way = track_id in wrong_way_ids if track_id is not None else False
         return {
             "lane_id": lane_id,
             "direction": direction or "unknown",
             "expected_direction": expected,
-            "wrong_way": bool(direction and direction != "unknown" and expected != "unknown" and direction != expected),
+            "wrong_way": wrong_way,
+            "wrong_way_event_id": wrong_way_event_ids.get(track_id) if wrong_way and track_id is not None else None,
         }
+
+    def add_vehicle(
+        xyxy: list[float],
+        track_id: int | None,
+        confidence: float | None,
+        occluded_prediction: bool,
+        retained_vehicle_id: object | None = None,
+        retained_event_id: object | None = None,
+    ) -> None:
+        rounded_box = [round(float(value), 2) for value in xyxy]
+        bottom_center = [
+            round((rounded_box[0] + rounded_box[2]) / 2, 2),
+            round(rounded_box[3], 2),
+        ]
+        vehicle_id = str(retained_vehicle_id or vehicle_ids.get(track_id) or "vehicle-untracked")
+        fields = movement_fields(bottom_center, track_id)
+        if fields["wrong_way"] and retained_event_id:
+            fields["wrong_way_event_id"] = str(retained_event_id)
+        detection: dict[str, object] = {
+            "class": "vehicle",
+            "vehicle_id": vehicle_id,
+            "confidence": round(float(confidence), 4) if confidence is not None else None,
+            "bbox_xyxy": rounded_box,
+            "bottom_center": bottom_center,
+            "occluded_prediction": occluded_prediction,
+            **fields,
+        }
+        if include_track_id:
+            # ``track_id`` is stable for the V2 consumer; the ByteTrack number
+            # remains available only as diagnostic information.
+            detection["track_id"] = vehicle_id
+            detection["byte_track_id"] = track_id
+        grouped["vehicle"].append(detection)
 
     if boxes is not None:
         ids = boxes.id.int().cpu().tolist() if include_track_id and boxes.id is not None else [None] * len(boxes)
@@ -508,40 +691,28 @@ def grouped_detection(
                 or (require_lane_membership and not box_is_inside_lanes(box, lane_points))
             ):
                 continue
-            output_name = label_overrides.get(track_id, class_aliases.get(class_map[class_id], class_map[class_id]))
-            xyxy = [round(float(value), 2) for value in box.xyxy[0].cpu().tolist()]
-            bottom_center = [round((xyxy[0] + xyxy[2]) / 2, 2), round(xyxy[3], 2)]
-            detection = {
-                "class_id": class_id,
-                "confidence": round(float(box.conf.item()), 4),
-                "bbox_xyxy": xyxy,
-                "bottom_center": bottom_center,
-                "occluded_prediction": False,
-                **movement_fields(bottom_center, track_id),
-            }
-            if include_track_id:
-                detection["track_id"] = track_id
-            grouped[output_name].append(detection)
+            add_vehicle(
+                [float(value) for value in box.xyxy[0].cpu().tolist()],
+                track_id,
+                float(box.conf.item()),
+                False,
+            )
     for track in retained_tracks or []:
-        xyxy = [round(float(value), 2) for value in track["bbox_xyxy"]]
-        bottom_center = [round((xyxy[0] + xyxy[2]) / 2, 2), round(xyxy[3], 2)]
+        xyxy = [float(value) for value in track["bbox_xyxy"]]
+        bottom_center = ((xyxy[0] + xyxy[2]) / 2, xyxy[3])
         if (
             require_lane_membership
             and lane_points
-            and point_lane((bottom_center[0], bottom_center[1]), lane_points) is None
+            and point_lane(bottom_center, lane_points) is None
         ):
             continue
-        track_id = track["track_id"]
-        grouped[str(track["label"])].append(
-            {
-                "class_id": None,
-                "track_id": track_id,
-                "confidence": None,
-                "bbox_xyxy": xyxy,
-                "bottom_center": bottom_center,
-                "occluded_prediction": True,
-                **movement_fields(bottom_center, track_id),
-            }
+        add_vehicle(
+            xyxy,
+            int(track["track_id"]),
+            None,
+            True,
+            retained_vehicle_id=track.get("vehicle_id"),
+            retained_event_id=track.get("wrong_way_event_id"),
         )
     return grouped
 
@@ -618,8 +789,7 @@ def annotated_frame(
                 or (require_lane_membership and not box_is_inside_lanes(box, lane_filter_points))
             ):
                 continue
-            original_name = class_map[class_id]
-            output_name = label_overrides.get(track_id, class_aliases.get(original_name, original_name))
+            output_name = label_overrides.get(track_id, "vehicle")
             draw_box(
                 output_name,
                 [float(value) for value in box.xyxy[0].cpu().tolist()],
@@ -840,6 +1010,11 @@ def run_v2_single_camera_from_settings() -> None:
 
     results = model.track(**track_kwargs)
     track_memory: dict[int, TrackState] = {}
+    lane_counters: dict[str, int] = defaultdict(int)
+    reassociate_gap_frames = max(
+        1,
+        round(fps * float(getattr(settings, "VEHICLE_ID_REASSOCIATE_SECONDS", 2.0))),
+    )
     window_112 = "Camera 112 - Vehicle tracking (v2 schedule only)"
     cv2.namedWindow(window_112, cv2.WINDOW_NORMAL)
     video_writer: cv2.VideoWriter | None = None
@@ -870,7 +1045,7 @@ def run_v2_single_camera_from_settings() -> None:
                 lane_filter_points = lane_rois(result.orig_img, profile)
                 lane_points = lane_filter_points if bool(settings.SHOW_LANES) else None
 
-                label_overrides, retained_tracks = stabilized_tracks(
+                label_overrides, retained_tracks, vehicle_ids = stabilized_tracks(
                     result,
                     class_map,
                     class_aliases,
@@ -880,13 +1055,28 @@ def run_v2_single_camera_from_settings() -> None:
                     frame_number,
                     int(settings.OCCLUSION_HOLD),
                     int(settings.MAX_HELD_TRACKS),
+                    lane_counters,
+                    reassociate_gap_frames,
+                    float(getattr(settings, "VEHICLE_ID_MAX_CENTER_DISTANCE", 70.0)),
+                    float(getattr(settings, "VEHICLE_ID_MIN_IOU", 0.05)),
                 )
                 direction_by_track = track_directions(track_memory)
-                violations = wrong_way_track_ids(
+                violations = confirmed_wrong_way_track_ids(
                     track_memory,
                     direction_by_track,
                     lane_filter_points,
                     allowed_by_lane,
+                    frame_number,
+                    int(getattr(settings, "WRONG_WAY_CONFIRM_FRAMES", 6)),
+                    float(getattr(settings, "WRONG_WAY_MIN_DISPLACEMENT_PIXELS", 12.0)),
+                )
+                wrong_way_event_ids_by_track = {
+                    track_id: state.wrong_way_event_id
+                    for track_id, state in track_memory.items()
+                    if track_id in violations and state.wrong_way_event_id
+                }
+                wrong_way_vehicle_ids = sorted(
+                    {vehicle_ids.get(track_id, f"byte-{track_id}") for track_id in violations}
                 )
                 vehicle_view = annotated_frame(
                     result,
@@ -928,6 +1118,9 @@ def run_v2_single_camera_from_settings() -> None:
                     lane_points=lane_filter_points,
                     direction_by_track=direction_by_track,
                     allowed_by_lane=allowed_by_lane,
+                    vehicle_ids=vehicle_ids,
+                    wrong_way_ids=violations,
+                    wrong_way_event_ids=wrong_way_event_ids_by_track,
                 )
                 record_112 = {
                     "frame": frame_number,
@@ -957,7 +1150,9 @@ def run_v2_single_camera_from_settings() -> None:
                         for lane, summary in lane_signals.items()
                     },
                     "lane_enforcement_directions": allowed_by_lane,
-                    "wrong_way_track_ids": sorted(violations),
+                    "wrong_way_tracker_ids": sorted(violations),
+                    "wrong_way_vehicle_ids": wrong_way_vehicle_ids,
+                    "wrong_way_event_ids": sorted(set(wrong_way_event_ids_by_track.values())),
                     "tracks_by_class": grouped,
                 }
                 append_jsonl_record(handle_112, record_112)

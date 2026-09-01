@@ -42,6 +42,8 @@ def iso_time(anchor: datetime, source_seconds: float) -> str:
 
 def normalize_vehicle_type(value: object) -> str:
     label = str(value).strip().lower()
+    if label == "vehicle":
+        return "vehicle"
     return VEHICLE_TYPE_ALIASES.get(
         label, "motor" if label in ("moto", "motorbike", "motorcycle", "motor") else "car"
     )
@@ -64,6 +66,7 @@ class TrafficWindowAggregator:
     _camera_profile: str = field(default="krung_thon_bridge", init=False)
     _samples: int = field(default=0, init=False)
     _vehicles: dict[str, str] = field(default_factory=dict, init=False)
+    _vehicle_mode: bool = field(default=False, init=False)
     _wrong_way_events: dict[str, dict[str, Any]] = field(default_factory=dict, init=False)
     _signals_147: dict[str, str] = field(default_factory=dict, init=False)
     _signals_156: dict[str, str] = field(default_factory=dict, init=False)
@@ -108,14 +111,17 @@ class TrafficWindowAggregator:
         source_time_for_event = float(record.get("time_seconds", 0.0))
         for raw_type, vehicles in (record.get("tracks_by_class") or {}).items():
             vehicle_type = normalize_vehicle_type(raw_type)
+            if vehicle_type == "vehicle":
+                self._vehicle_mode = True
             for vehicle in vehicles or []:
-                track_id = vehicle.get("track_id")
-                if track_id is None:
+                vehicle_id = vehicle.get("vehicle_id") or vehicle.get("track_id")
+                if vehicle_id is None:
                     continue
-                track_key = str(track_id)
-                self._vehicles[track_key] = vehicle_type
+                vehicle_key = str(vehicle_id)
+                self._vehicles[vehicle_key] = vehicle_type
                 if bool(vehicle.get("wrong_way")):
-                    self._record_wrong_way(track_id, vehicle_type, vehicle, source_time_for_event)
+                    event_id = vehicle.get("wrong_way_event_id") or f"WW-{vehicle_key}"
+                    self._record_wrong_way(event_id, vehicle_type, vehicle, source_time_for_event)
 
         return completed
 
@@ -160,10 +166,14 @@ class TrafficWindowAggregator:
             "lanes": self._lanes,
             "traffic": {
                 "unique_vehicle_count": len(self._vehicles),
-                "vehicles_by_type": {
-                    "car": counts.get("car", 0),
-                    "motor": counts.get("motor", 0),
-                },
+                "vehicles_by_type": (
+                    {"vehicle": counts.get("vehicle", 0)}
+                    if self._vehicle_mode
+                    else {
+                        "car": counts.get("car", 0),
+                        "motor": counts.get("motor", 0),
+                    }
+                ),
             },
             "wrong_way": self._wrong_way_summary(),
         }
@@ -177,17 +187,17 @@ class TrafficWindowAggregator:
             if lane_id not in by_lane:
                 by_lane[lane_id] = {
                     "count": 0,
-                    "car": 0,
-                    "motor": 0,
                     "direction": event.get("direction", "unknown"),
                     "expected_direction": event.get("expected_direction", "unknown"),
                 }
             by_lane[lane_id]["count"] += 1
-            v_type = event.get("vehicle_type", "car")
-            if v_type == "motor":
-                by_lane[lane_id]["motor"] += 1
+            v_type = str(event.get("vehicle_type", "car"))
+            if v_type == "vehicle":
+                by_lane[lane_id]["vehicle"] = int(by_lane[lane_id].get("vehicle", 0)) + 1
+            elif v_type == "motor":
+                by_lane[lane_id]["motor"] = int(by_lane[lane_id].get("motor", 0)) + 1
             else:
-                by_lane[lane_id]["car"] += 1
+                by_lane[lane_id]["car"] = int(by_lane[lane_id].get("car", 0)) + 1
 
             if by_lane[lane_id]["direction"] == "unknown" and event.get("direction") != "unknown":
                 by_lane[lane_id]["direction"] = event["direction"]
@@ -202,18 +212,20 @@ class TrafficWindowAggregator:
 
     def _record_wrong_way(
         self,
-        track_id: object,
+        event_id: object,
         vehicle_type: str,
         vehicle: dict[str, Any],
         source_time: float,
     ) -> None:
-        key = str(track_id)
+        key = str(event_id)
         seen_at = iso_time(self.anchor_time, source_time)
         existing = self._wrong_way_events.get(key)
         if existing is None:
             self._wrong_way_events[key] = {
                 "event_type": "WRONG_WAY",
-                "track_id": track_id,
+                "event_id": key,
+                "track_id": vehicle.get("track_id"),
+                "vehicle_id": vehicle.get("vehicle_id") or vehicle.get("track_id"),
                 "vehicle_type": vehicle_type,
                 "lane_id": vehicle.get("lane_id"),
                 "direction": vehicle.get("direction", "unknown"),
@@ -245,6 +257,7 @@ class TrafficWindowAggregator:
         self._last_time = None
         self._samples = 0
         self._vehicles.clear()
+        self._vehicle_mode = False
         self._wrong_way_events.clear()
         self._signals_147 = {}
         self._signals_156 = {}
