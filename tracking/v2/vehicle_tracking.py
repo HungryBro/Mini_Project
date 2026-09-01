@@ -1,0 +1,1017 @@
+"""V2 — YOLO vehicle tracking for Krung Thon camera 112 only.
+
+Choose the source in settings.py:
+    SOURCE_MODE = "video_files"  # local video file
+    SOURCE_MODE = "live_stream"  # live camera stream
+
+V2 never opens, reads, or uses other cameras. Lane direction comes only from
+the timetable and the time obtained from camera 112 (or the configured fallback).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import re
+import socket
+import subprocess
+import sys
+import tempfile
+from collections import Counter, defaultdict, deque
+from dataclasses import dataclass, field
+from datetime import datetime, time, timedelta
+from pathlib import Path
+from typing import Any
+from zoneinfo import ZoneInfo
+
+# pyrefly: ignore [missing-import]
+import cv2
+# pyrefly: ignore [missing-import]
+import numpy as np
+# pyrefly: ignore [missing-import]
+from ultralytics import YOLO
+from ultralytics.utils import LOGGER
+
+LOGGER.setLevel(logging.ERROR)
+
+# v2 lives in tracking/v2; project-wide regions and payload code live two levels up.
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = SCRIPT_DIR.parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+payload_dir = PROJECT_ROOT / "payload"
+if str(payload_dir) not in sys.path:
+    sys.path.insert(0, str(payload_dir))
+
+# pyrefly: ignore [missing-import]
+from traffic_payload import TrafficWindowAggregator
+from config.krung_thon_bridge_regions import camera_112_lane_rois, camera_112_roi, point_lane
+
+VEHICLE_NAMES = {
+    "car", "motorcycle", "motorbike", "bus", "truck", "pickup", "taxi", "van", "truck trailer",
+}
+
+CLASS_COLORS_BGR = {
+    "car": (255, 180, 0),
+    "taxi": (255, 180, 0),
+    "bus": (0, 165, 255),
+    "motorbike": (255, 0, 255),
+    "motorcycle": (255, 0, 255),
+    "moto": (255, 0, 255),
+    "pickup": (0, 180, 0),
+    "truck": (0, 0, 255),
+    "truck trailer": (0, 120, 255),
+    "van": (0, 200, 200),
+}
+
+BRIDGE_ROI_NORMALIZED = (
+    (0.170, 0.954), (0.580, 0.160), (0.661, 0.142), (0.508, 0.953),
+)
+GATE_A_NORMALIZED = (0.576, 0.297)
+GATE_B_NORMALIZED = (0.394, 0.771)
+PROFILE_TAKSIN = "taksin"
+PROFILE_KRUNG_THON = "krung_thon_bridge"
+KRUNG_THON_TIMETABLE = (
+    ("morning", ((time(5, 30), time(7, 30)), (time(8, 20), time(8, 45))), ("up", "up", "up", "down")),
+    ("evening", ((time(15, 30), time(16, 30)), (time(17, 0), time(17, 45)), (time(18, 15), time(20, 30))), ("up", "down", "down", "down")),
+)
+KRUNG_THON_DEFAULT_DIRECTIONS = ("up", "up", "down", "down")
+
+def parse_clock_timestamp(value: str) -> datetime:
+    """Parse an operator override for a camera overlay timestamp."""
+    normalized = value.strip().replace("T", " ").replace("/", "-")
+    try:
+        return datetime.strptime(normalized, "%Y-%m-%d %H:%M:%S")
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "Use YYYY-MM-DD HH:MM:SS, for example 2026-08-26 11:06:44"
+        ) from exc
+
+def vehicle_class_map(model: YOLO, selected_names: set[str] | None = None) -> dict[int, str]:
+    """Match either COCO weights or the project's four-class checkpoint.
+
+    COCO uses class IDs 2, 3, 5 and 7, whereas the fine-tuned bridge model
+    uses IDs 0..3.  Looking up class names keeps the inference pipeline
+    compatible with both and avoids silently filtering out custom-model cars.
+    """
+    selected_names = selected_names or VEHICLE_NAMES
+    names = model.names
+    items = names.items() if isinstance(names, dict) else enumerate(names)
+    return {int(class_id): str(name).lower() for class_id, name in items if str(name).lower() in selected_names}
+
+def bridge_roi(frame, profile: str = PROFILE_TAKSIN) -> np.ndarray:
+    """Return the selected bridge-road ROI at the current frame resolution."""
+    if profile == PROFILE_KRUNG_THON:
+        return camera_112_roi(frame)
+    height, width = frame.shape[:2]
+    return np.array(
+        [(round(x * width), round(y * height)) for x, y in BRIDGE_ROI_NORMALIZED],
+        dtype=np.int32,
+    )
+
+def lane_rois(frame, profile: str) -> dict[str, np.ndarray] | None:
+    if profile != PROFILE_KRUNG_THON:
+        return None
+    return camera_112_lane_rois(frame)
+
+def timetable_directions(timestamp: datetime | None) -> tuple[dict[str, str] | None, str | None]:
+    """Return the daily timetable direction map at one camera timestamp."""
+    if timestamp is None:
+        timestamp = datetime.now().astimezone()
+    now = timestamp.time()
+    for period, windows, directions in KRUNG_THON_TIMETABLE:
+        if any(start <= now < end for start, end in windows):
+            return {f"lane_{index}": direction for index, direction in enumerate(directions, start=1)}, period
+    return {f"lane_{index}": direction for index, direction in enumerate(KRUNG_THON_DEFAULT_DIRECTIONS, start=1)}, "default"
+
+def timestamp_at(start_timestamp: datetime | None, elapsed_seconds: float) -> datetime | None:
+    return start_timestamp + timedelta(seconds=elapsed_seconds) if start_timestamp else None
+
+def _clock_crop(frame: np.ndarray, camera: str) -> np.ndarray:
+    """Crop the known on-screen timestamp location for the three cameras."""
+    height, width = frame.shape[:2]
+    if camera == "112":
+        return frame[: min(height, 62), : min(width, 310)]
+    return frame[max(0, height - 78): height, max(0, width - 320): width]
+
+def read_timestamp_from_frame(frame: np.ndarray, camera: str, scratch_dir: Path) -> datetime | None:
+    """OCR one clock overlay once; operator-supplied timestamps remain available.
+
+    Tesseract is only invoked for the first frame of each input video, never
+    per frame. If it is unavailable or cannot read the overlay, the caller
+    simply omits that camera from the schedule vote.
+    """
+    crop = _clock_crop(frame, camera)
+    if crop.size == 0:
+        return None
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    enlarged = cv2.resize(gray, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
+    prepared = enlarged
+    scratch_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        prefix=f"clock_{camera}_", suffix=".png", dir=scratch_dir, delete=False
+    ) as temporary:
+        image_path = Path(temporary.name)
+    try:
+        if not cv2.imwrite(str(image_path), prepared):
+            return None
+        result = subprocess.run(
+            ["tesseract", str(image_path), "stdout", "--psm", "6"],
+            check=False,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=10,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return None
+    finally:
+        image_path.unlink(missing_ok=True)
+    match = re.search(r"20\d{2}[-/]\d{2}[-/]\d{2}\s+\d{2}:\d{2}:\d{2}", result.stdout)
+    if not match:
+        return None
+    try:
+        return parse_clock_timestamp(match.group())
+    except argparse.ArgumentTypeError:
+        return None
+
+def read_video_start_timestamp(source: Path, camera: str, scratch_dir: Path) -> datetime | None:
+    """Read a camera timestamp from only the first frame of its input video."""
+    capture = cv2.VideoCapture(str(source))
+    try:
+        ok, frame = capture.read()
+        return read_timestamp_from_frame(frame, camera, scratch_dir) if ok else None
+    finally:
+        capture.release()
+
+def resolve_start_timestamp(
+    source: Path | None, camera: str, override: datetime | None, scratch_dir: Path
+) -> tuple[datetime | None, str]:
+    """Use the explicit value first, then one OSD read from that camera."""
+    if override is not None:
+        return override, "argument"
+    if source is None:
+        return None, "unavailable"
+    detected = read_video_start_timestamp(source, camera, scratch_dir)
+    return (detected, "osd_ocr") if detected else (None, "unavailable")
+
+def box_is_inside_roi(box, roi_points: np.ndarray | None) -> bool:
+    """Use a vehicle's tyre-side centre, rather than its whole box, for ROI membership."""
+    if roi_points is None:
+        return True
+    x1, _y1, x2, y2 = box.xyxy[0].cpu().tolist()
+    return point_is_inside_roi(((x1 + x2) / 2, y2), roi_points)
+
+def box_is_inside_lanes(box, lane_points: dict[str, np.ndarray] | None) -> bool:
+    """Keep a vehicle only when its tyre-side centre falls in one of 4 lanes."""
+    if not lane_points:
+        return True
+    x1, _y1, x2, y2 = box.xyxy[0].cpu().tolist()
+    return point_lane(((x1 + x2) / 2, y2), lane_points) is not None
+
+def point_is_inside_roi(bottom_center: tuple[float, float], roi_points: np.ndarray | None) -> bool:
+    if roi_points is None:
+        return True
+    return cv2.pointPolygonTest(roi_points.astype(np.float32), bottom_center, False) >= 0
+
+class TrackState:
+    """Small display cache used while ByteTrack temporarily loses a detection."""
+
+    label: str
+    bbox_xyxy: list[float]
+    center: tuple[float, float]
+    velocity: tuple[float, float]
+    last_seen_frame: int
+    observations: int
+    confidence: float
+    vertical_motion: deque[float] = field(default_factory=lambda: deque(maxlen=10))
+
+def track_directions(track_memory: dict[int, TrackState]) -> dict[int, str]:
+    """Classify the recent vertical motion of confirmed ByteTrack objects.
+
+    Image ``y`` gets smaller when a vehicle travels up the bridge, and grows
+    when it travels down toward the camera.  Summing a short motion window
+    avoids marking a stationary vehicle wrong-way when its detection box
+    jitters by a pixel or two.
+    """
+    directions: dict[int, str] = {}
+    for track_id, state in track_memory.items():
+        if state.observations < 4 or len(state.vertical_motion) < 3:
+            continue
+        movement_y = sum(state.vertical_motion)
+        if movement_y <= -3.0:
+            directions[track_id] = "up"
+        elif movement_y >= 3.0:
+            directions[track_id] = "down"
+        else:
+            directions[track_id] = "unknown"
+    return directions
+
+def wrong_way_track_ids(
+    track_memory: dict[int, TrackState],
+    directions: dict[int, str],
+    lane_points: dict[str, np.ndarray] | None,
+    allowed_by_lane: dict[str, str],
+) -> set[int]:
+    """Return only tracks moving opposite to a readable lane direction."""
+    violations: set[int] = set()
+    if not lane_points:
+        return violations
+    for track_id, direction in directions.items():
+        state = track_memory.get(track_id)
+        if state is None:
+            continue
+        x1, _y1, x2, y2 = state.bbox_xyxy
+        lane_id = point_lane(((x1 + x2) / 2, y2), lane_points)
+        expected = allowed_by_lane.get(lane_id, "unknown") if lane_id else "unknown"
+        if direction in {"up", "down"} and expected in {"up", "down"} and direction != expected:
+            violations.add(track_id)
+    return violations
+
+def stabilized_tracks(
+    result,
+    class_map: dict[int, str],
+    class_aliases: dict[str, str],
+    roi_points: np.ndarray | None,
+    lane_points: dict[str, np.ndarray] | None,
+    memory: dict[int, TrackState],
+    frame_number: int,
+    hold_frames: int,
+    max_held_tracks: int,
+) -> tuple[dict[int, str], list[dict[str, object]]]:
+    """Lock a track's first label and briefly predict its box during occlusion."""
+    label_overrides: dict[int, str] = {}
+    seen_ids: set[int] = set()
+    boxes = result.boxes
+    if boxes is not None and boxes.id is not None:
+        ids = boxes.id.int().cpu().tolist()
+        for box, track_id in zip(boxes, ids):
+            class_id = int(box.cls.item())
+            if (
+                class_id not in class_map
+                or not box_is_inside_roi(box, roi_points)
+                or not box_is_inside_lanes(box, lane_points)
+            ):
+                continue
+            xyxy = [float(value) for value in box.xyxy[0].cpu().tolist()]
+            center = ((xyxy[0] + xyxy[2]) / 2, (xyxy[1] + xyxy[3]) / 2)
+            raw_label = class_aliases.get(class_map[class_id], class_map[class_id])
+            confidence = float(box.conf.item())
+            state = memory.get(track_id)
+            if state is None:
+                state = TrackState(raw_label, xyxy, center, (0.0, 0.0), frame_number, 1, confidence)
+                memory[track_id] = state
+            else:
+                state.velocity = (center[0] - state.center[0], center[1] - state.center[1])
+                state.vertical_motion.append(state.velocity[1])
+                state.bbox_xyxy = xyxy
+                state.center = center
+                state.last_seen_frame = frame_number
+                state.observations += 1
+                state.confidence = confidence
+            # Keep the first stable track label so it does not flicker between
+            # bus/truck or motorcycle/car as detections vary frame to frame.
+            label_overrides[track_id] = state.label
+            seen_ids.add(track_id)
+
+    retained_candidates: list[tuple[int, int, float, dict[str, object]]] = []
+    frame_height, frame_width = result.orig_img.shape[:2]
+    for track_id, state in list(memory.items()):
+        missed_frames = frame_number - state.last_seen_frame
+        if track_id in seen_ids or missed_frames <= 0:
+            continue
+        # A one-frame false positive must disappear immediately rather than
+        # creating a long-lived ghost box.  Confirm real tracks first.
+        if missed_frames <= hold_frames and state.observations >= 5 and state.confidence >= 0.50:
+            dx, dy = state.velocity[0] * missed_frames, state.velocity[1] * missed_frames
+            x1, y1, x2, y2 = state.bbox_xyxy
+            predicted = [
+                max(0.0, min(frame_width - 1.0, x1 + dx)),
+                max(0.0, min(frame_height - 1.0, y1 + dy)),
+                max(0.0, min(frame_width - 1.0, x2 + dx)),
+                max(0.0, min(frame_height - 1.0, y2 + dy)),
+            ]
+            bottom_center = ((predicted[0] + predicted[2]) / 2, predicted[3])
+            if point_is_inside_roi(bottom_center, roi_points):
+                retained_candidates.append(
+                    (
+                        state.observations,
+                        -missed_frames,
+                        state.confidence,
+                        {
+                            "track_id": track_id,
+                            "label": state.label,
+                            "bbox_xyxy": predicted,
+                            "bottom_center": bottom_center,
+                        },
+                    )
+                )
+        # Let ByteTrack keep its own longer-lived state, but do not keep stale
+        # display data forever after an object has left the scene.
+        if missed_frames > max(hold_frames, 90):
+            del memory[track_id]
+    # Prefer confirmed, recently observed, high-confidence tracks.  This avoids
+    # filling a busy scene with stale boxes when several vehicles overlap.
+    retained_candidates.sort(key=lambda item: item[:3], reverse=True)
+    retained_tracks = [item[3] for item in retained_candidates[:max_held_tracks]]
+    return label_overrides, retained_tracks
+
+def gate_endpoints(roi_points: np.ndarray, y_normalized: float, frame_height: int) -> tuple[tuple[int, int], tuple[int, int]]:
+    """Intersect a horizontal gate at ``y_normalized`` with the bridge polygon."""
+    target_y = round(y_normalized * frame_height)
+    intersections: list[tuple[int, int]] = []
+    for start, end in zip(roi_points, np.roll(roi_points, -1, axis=0)):
+        x1, y1 = map(int, start)
+        x2, y2 = map(int, end)
+        if y1 == y2 or not min(y1, y2) <= target_y <= max(y1, y2):
+            continue
+        ratio = (target_y - y1) / (y2 - y1)
+        intersections.append((round(x1 + ratio * (x2 - x1)), target_y))
+    if len(intersections) != 2:
+        raise ValueError("Gate does not cross the bridge ROI exactly twice")
+    return tuple(sorted(intersections))
+
+def horizontal_polygon_span(polygon: np.ndarray, target_y: int) -> tuple[int, int] | None:
+    """Return the left/right intersections of a lane polygon at one y level."""
+    intersections: list[float] = []
+    for start, end in zip(polygon, np.roll(polygon, -1, axis=0)):
+        x1, y1 = map(float, start)
+        x2, y2 = map(float, end)
+        if y1 == y2 or not min(y1, y2) <= target_y <= max(y1, y2):
+            continue
+        ratio = (target_y - y1) / (y2 - y1)
+        intersections.append(x1 + ratio * (x2 - x1))
+    if len(intersections) < 2:
+        return None
+    return round(min(intersections)), round(max(intersections))
+
+def draw_text_panel(
+    frame: np.ndarray,
+    lines: list[tuple[str, tuple[int, int, int]]],
+    corner: str,
+    font_scale: float = 0.43,
+    padding: int = 5,
+    margin: int = 6,
+) -> None:
+    """Draw a compact panel sized to its longest text line.
+
+    ``corner`` is deliberately limited to the two locations used by the three
+    camera outputs.  Text extents are measured with OpenCV before drawing, so
+    the dark panel ends just after the last letter rather than reserving a
+    fixed, scene-blocking rectangle.
+    """
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    metrics = [cv2.getTextSize(text, font, font_scale, 1) for text, _color in lines]
+    max_width = max(width for (width, _height), _baseline in metrics)
+    line_height = max(height + baseline for (_width, height), baseline in metrics)
+    panel_width = max_width + padding * 2
+    panel_height = line_height * len(lines) + padding * 2
+    frame_height, frame_width = frame.shape[:2]
+    x = frame_width - panel_width - margin if corner == "top_right" else margin
+    y = margin if corner == "top_right" else frame_height - panel_height - margin
+    x = max(0, x)
+    y = max(0, y)
+    cv2.rectangle(frame, (x, y), (x + panel_width, y + panel_height), (0, 0, 0), -1)
+    baseline_y = y + padding + metrics[0][0][1]
+    for (text, color), ((_, text_height), _baseline) in zip(lines, metrics):
+        cv2.putText(frame, text, (x + padding, baseline_y), font, font_scale, color, 1, cv2.LINE_AA)
+        baseline_y += line_height
+
+def draw_bridge_guides(
+    frame,
+    roi_points: np.ndarray,
+    show_gates: bool,
+    lane_points: dict[str, np.ndarray] | None = None,
+    lane_signals: dict[str, dict[str, object]] | None = None,
+    camera_timestamp: datetime | None = None,
+) -> None:
+    """Draw camera-112 lane regions and timetable directions only."""
+    h_frame, w_frame = frame.shape[:2]
+    cv2.putText(frame, "<- Bang Phlat ->", (round(w_frame * 0.39), 24), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 2, cv2.LINE_AA)
+    cv2.putText(frame, "<- Samsen ->", (round(w_frame * 0.41), h_frame - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 2, cv2.LINE_AA)
+
+    label_y = round(h_frame * 0.644)
+    arrow_y = round(h_frame * 0.735)
+    white = (255, 255, 255)
+    for lane_name, polygon in (lane_points or {}).items():
+        direction = str((lane_signals or {}).get(lane_name, {}).get("direction", "unknown"))
+        cv2.polylines(frame, [polygon], True, white, 2, cv2.LINE_AA)
+        span = horizontal_polygon_span(polygon, label_y)
+        if span:
+            label = f"{lane_name.replace('_', ' ')} {direction}"
+            (label_width, _), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.38, 1)
+            cv2.putText(frame, label, (max(2, round((span[0] + span[1] - label_width) / 2)), label_y), cv2.FONT_HERSHEY_SIMPLEX, 0.38, white, 1, cv2.LINE_AA)
+        arrow_span = horizontal_polygon_span(polygon, arrow_y)
+        if arrow_span and direction in {"up", "down"}:
+            arrow_x = round((arrow_span[0] + arrow_span[1]) / 2)
+            half_length = max(14, round(h_frame * 0.0475))
+            start, end = ((arrow_x, arrow_y + half_length), (arrow_x, arrow_y - half_length)) if direction == "up" else ((arrow_x, arrow_y - half_length), (arrow_x, arrow_y + half_length))
+            cv2.arrowedLine(frame, start, end, white, 2, cv2.LINE_AA, tipLength=0.32)
+
+    if lane_signals:
+        timestamp = camera_timestamp or datetime.now().astimezone()
+        lines: list[tuple[str, tuple[int, int, int]]] = [(f"TIME: {timestamp:%Y-%m-%d %H:%M:%S}", white)]
+        for index in range(1, 5):
+            summary = lane_signals.get(f"lane_{index}", {})
+            direction = str(summary.get("direction", "unknown"))
+            period = str(summary.get("schedule_period", "default"))
+            color = {"up": (0, 220, 0), "down": (0, 0, 255)}.get(direction, (0, 220, 220))
+            lines.append((f"L{index} {direction.upper()} | 112 schedule ({period})", color))
+        draw_text_panel(frame, lines, "top_right", font_scale=0.36, padding=6, margin=8)
+
+    if not show_gates:
+        return
+    for label, (_x_normalized, y_normalized), color in (("GATE A", GATE_A_NORMALIZED, (255, 0, 0)), ("GATE B", GATE_B_NORMALIZED, (0, 0, 255))):
+        left, right = gate_endpoints(roi_points, y_normalized, h_frame)
+        cv2.line(frame, left, right, color, 4, cv2.LINE_AA)
+        cv2.putText(frame, label, (left[0] + 8, max(26, left[1] - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2, cv2.LINE_AA)
+
+def grouped_detection(
+    result,
+    class_map: dict[int, str],
+    include_track_id: bool = False,
+    class_aliases: dict[str, str] | None = None,
+    roi_points: np.ndarray | None = None,
+    label_overrides: dict[int, str] | None = None,
+    retained_tracks: list[dict[str, object]] | None = None,
+    lane_points: dict[str, np.ndarray] | None = None,
+    require_lane_membership: bool = True,
+    direction_by_track: dict[int, str] | None = None,
+    allowed_by_lane: dict[str, str] | None = None,
+) -> dict[str, list[dict]]:
+    grouped: dict[str, list[dict]] = defaultdict(list)
+    boxes = result.boxes
+    class_aliases = class_aliases or {}
+    label_overrides = label_overrides or {}
+    direction_by_track = direction_by_track or {}
+    allowed_by_lane = allowed_by_lane or {}
+
+    def movement_fields(bottom_center: list[float], track_id: int | None) -> dict[str, object]:
+        lane_id = point_lane((bottom_center[0], bottom_center[1]), lane_points) if lane_points else None
+        direction = direction_by_track.get(track_id) if track_id is not None else None
+        expected = allowed_by_lane.get(lane_id, "unknown") if lane_id else "unknown"
+        return {
+            "lane_id": lane_id,
+            "direction": direction or "unknown",
+            "expected_direction": expected,
+            "wrong_way": bool(direction and direction != "unknown" and expected != "unknown" and direction != expected),
+        }
+
+    if boxes is not None:
+        ids = boxes.id.int().cpu().tolist() if include_track_id and boxes.id is not None else [None] * len(boxes)
+        for box, track_id in zip(boxes, ids):
+            class_id = int(box.cls.item())
+            if (
+                class_id not in class_map
+                or not box_is_inside_roi(box, roi_points)
+                or (require_lane_membership and not box_is_inside_lanes(box, lane_points))
+            ):
+                continue
+            output_name = label_overrides.get(track_id, class_aliases.get(class_map[class_id], class_map[class_id]))
+            xyxy = [round(float(value), 2) for value in box.xyxy[0].cpu().tolist()]
+            bottom_center = [round((xyxy[0] + xyxy[2]) / 2, 2), round(xyxy[3], 2)]
+            detection = {
+                "class_id": class_id,
+                "confidence": round(float(box.conf.item()), 4),
+                "bbox_xyxy": xyxy,
+                "bottom_center": bottom_center,
+                "occluded_prediction": False,
+                **movement_fields(bottom_center, track_id),
+            }
+            if include_track_id:
+                detection["track_id"] = track_id
+            grouped[output_name].append(detection)
+    for track in retained_tracks or []:
+        xyxy = [round(float(value), 2) for value in track["bbox_xyxy"]]
+        bottom_center = [round((xyxy[0] + xyxy[2]) / 2, 2), round(xyxy[3], 2)]
+        if (
+            require_lane_membership
+            and lane_points
+            and point_lane((bottom_center[0], bottom_center[1]), lane_points) is None
+        ):
+            continue
+        track_id = track["track_id"]
+        grouped[str(track["label"])].append(
+            {
+                "class_id": None,
+                "track_id": track_id,
+                "confidence": None,
+                "bbox_xyxy": xyxy,
+                "bottom_center": bottom_center,
+                "occluded_prediction": True,
+                **movement_fields(bottom_center, track_id),
+            }
+        )
+    return grouped
+
+def apply_class_aliases(model: YOLO, class_aliases: dict[str, str]) -> None:
+    """Change only the display names in-place; model class IDs stay unchanged."""
+    if not class_aliases:
+        return
+    # ``YOLO.names`` returns a copy; mutate the underlying model names so
+    # Ultralytics' plotted annotations also use the aliased label.
+    names = model.model.names
+    if isinstance(names, dict):
+        for class_id, name in list(names.items()):
+            names[class_id] = class_aliases.get(str(name).lower(), str(name))
+    else:
+        for class_id, name in enumerate(names):
+            names[class_id] = class_aliases.get(str(name).lower(), str(name))
+
+def annotated_frame(
+    result,
+    class_map: dict[int, str],
+    class_aliases: dict[str, str] | None = None,
+    roi_points: np.ndarray | None = None,
+    show_gates: bool = True,
+    label_overrides: dict[int, str] | None = None,
+    retained_tracks: list[dict[str, object]] | None = None,
+    lane_points: dict[str, np.ndarray] | None = None,
+    lane_signals: dict[str, dict[str, object]] | None = None,
+    lane_filter_points: dict[str, np.ndarray] | None = None,
+    require_lane_membership: bool = True,
+    alert_wrong_way: bool = False,
+    wrong_way_ids: set[int] | None = None,
+    source_frame: np.ndarray | None = None,
+    camera_timestamp: datetime | None = None,
+) -> object:
+    """Render boxes and optionally highlight tracked wrong-way vehicles."""
+    frame = (source_frame if source_frame is not None else result.orig_img).copy()
+    if roi_points is not None:
+        draw_bridge_guides(frame, roi_points, show_gates, lane_points, lane_signals, camera_timestamp=camera_timestamp)
+    boxes = result.boxes
+    class_aliases = class_aliases or {}
+    label_overrides = label_overrides or {}
+    wrong_way_ids = wrong_way_ids or set()
+
+    def draw_box(label: str, xyxy: list[float], occluded: bool = False, wrong_way: bool = False) -> None:
+        if alert_wrong_way:
+            color = (0, 0, 255) if wrong_way else (0, 220, 0)
+            display_label = label
+            text_color = (0, 0, 0)
+        else:
+            color_name = "car" if label in {"car", "taxi"} else label
+            color = CLASS_COLORS_BGR.get(color_name, (255, 255, 255))
+            display_label = f"{label} (hold)" if occluded else label
+            text_color = color
+        x1, y1, x2, y2 = [int(round(value)) for value in xyxy]
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 1 if occluded else 2)
+        cv2.putText(
+            frame,
+            display_label,
+            (x1, max(22, y1 - 8)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55 if occluded else 0.65,
+            text_color,
+            1 if occluded else 2,
+            cv2.LINE_AA,
+        )
+
+    if boxes is not None:
+        ids = boxes.id.int().cpu().tolist() if boxes.id is not None else [None] * len(boxes)
+        for box, track_id in zip(boxes, ids):
+            class_id = int(box.cls.item())
+            if (
+                class_id not in class_map
+                or not box_is_inside_roi(box, roi_points)
+                or (require_lane_membership and not box_is_inside_lanes(box, lane_filter_points))
+            ):
+                continue
+            original_name = class_map[class_id]
+            output_name = label_overrides.get(track_id, class_aliases.get(original_name, original_name))
+            draw_box(
+                output_name,
+                [float(value) for value in box.xyxy[0].cpu().tolist()],
+                wrong_way=track_id in wrong_way_ids,
+            )
+    for track in retained_tracks or []:
+        draw_box(
+            str(track["label"]),
+            list(track["bbox_xyxy"]),
+            occluded=True,
+            wrong_way=track["track_id"] in wrong_way_ids,
+        )
+    return frame
+
+def append_jsonl_record(handle, record: dict[str, object]) -> None:
+    """Append one complete JSONL record so logs remain readable while running."""
+    handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    # Flush every frame: pressing q or an unexpected interruption still leaves
+    # all earlier records visible in the JSONL file immediately.
+    handle.flush()
+
+def _configured_timestamp(value: object) -> datetime | None:
+    """Allow None or the readable timestamp text used in settings.py."""
+    if value is None or isinstance(value, datetime):
+        return value
+    return parse_clock_timestamp(str(value))
+
+def send_udp_payload(sock: socket.socket | None, payload: dict[str, Any], host: str, port: int) -> None:
+    if sock is None:
+        return
+    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    summary = payload.get("traffic", {})
+    wrong_way = payload.get("wrong_way", {})
+    print(
+        f"\n[UDP LIVE OUT] {payload.get('location', {}).get('site_id', 'site')} "
+        f"{payload.get('window', {}).get('start')} -> {payload.get('window', {}).get('end')} "
+        f"| vehicles={summary.get('unique_vehicle_count', 0)} wrong_way={wrong_way.get('count', 0)} bytes={len(encoded)}",
+        flush=True,
+    )
+    try:
+        sock.sendto(encoded, (host, port))
+    except Exception as err:
+        print(f"[UDP ERROR] Could not send payload to {host}:{port}: {err}", flush=True)
+
+def send_mqtt_payload(client: Any, payload: dict[str, Any], topic: str) -> None:
+    if client is None:
+        return
+    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    summary = payload.get("traffic", {})
+    wrong_way = payload.get("wrong_way", {})
+    print(
+        f"\n[MQTT LIVE OUT] topic={topic} "
+        f"{payload.get('window', {}).get('start')} -> {payload.get('window', {}).get('end')} "
+        f"| vehicles={summary.get('unique_vehicle_count', 0)} wrong_way={wrong_way.get('count', 0)} bytes={len(encoded)}",
+        flush=True,
+    )
+    try:
+        client.publish(topic, encoded)
+    except Exception as err:
+        print(f"[MQTT ERROR] Could not publish payload to topic {topic}: {err}", flush=True)
+
+def _is_url(val: object) -> bool:
+    s = str(val).strip().lower()
+    return s.startswith(("http://", "https://", "rtsp://", "rtmp://"))
+
+def live_recording_fps(source_fps: object, fallback_fps: object = 25.0) -> float:
+    """Pick the supported 25/30 FPS rate closest to the live camera rate."""
+    try:
+        candidate = float(source_fps)
+    except (TypeError, ValueError):
+        candidate = 0.0
+    if candidate <= 0.0 or candidate > 120.0:
+        candidate = float(fallback_fps)
+    return 30.0 if candidate >= 27.5 else 25.0
+
+BANGKOK_TIMEZONE = ZoneInfo("Asia/Bangkok")
+
+def schedule_lane_signals_from_112(
+    timestamp: datetime | None, timestamp_source: str
+) -> dict[str, dict[str, object]]:
+    """Set all four lane directions from the Krung Thon timetable and camera 112 time."""
+    directions, period = timetable_directions(timestamp)
+    result: dict[str, dict[str, object]] = {}
+    for index in range(1, 5):
+        lane = f"lane_{index}"
+        direction = directions.get(lane, "unknown") if directions else "unknown"
+        result[lane] = {
+            "direction": direction,
+            "enforcement_direction": direction,
+            "source": "schedule_112",
+            "schedule_direction": direction,
+            "schedule_period": period or "unknown",
+            "schedule_timestamp": timestamp.isoformat(sep=" ") if timestamp else None,
+            "schedule_timestamp_source": timestamp_source,
+            "schedule_confidence": 1.0 if timestamp else 0.0,
+        }
+    return result
+
+def run_v2_single_camera_from_settings() -> None:
+    """Run v2: camera 112 detects vehicles and its timetable sets lane direction."""
+    import settings
+
+    source_value = getattr(settings, "CAMERA_112_SOURCE", "")
+    source: str | Path = str(source_value) if _is_url(source_value) else Path(source_value).expanduser()
+    model_path = Path(settings.MODEL_PATH).expanduser()
+    tracker_path = Path(settings.TRACKER_PATH).expanduser()
+    if not model_path.exists():
+        raise SystemExit(f"YOLO model not found: {model_path}\nEdit tracking/v2/settings.py and try again.")
+    if not tracker_path.exists():
+        raise SystemExit(f"ByteTrack configuration not found: {tracker_path}\nEdit tracking/v2/settings.py and try again.")
+    if not _is_url(source) and isinstance(source, Path) and not source.exists():
+        raise SystemExit(f"Camera 112 source not found: {source}\nEdit tracking/v2/settings.py and try again.")
+
+    profile = str(settings.PROFILE)
+    if profile not in {PROFILE_TAKSIN, PROFILE_KRUNG_THON}:
+        raise SystemExit("settings.PROFILE must be 'taksin' or 'krung_thon_bridge'.")
+
+    model = YOLO(str(model_path))
+    class_map = vehicle_class_map(model)
+    if not class_map:
+        raise SystemExit("The selected model has no supported vehicle classes.")
+    class_aliases: dict[str, str] = {}
+    if profile == PROFILE_KRUNG_THON:
+        class_aliases["motorcycle"] = "moto"
+    apply_class_aliases(model, class_aliases)
+
+    capture = cv2.VideoCapture(str(source))
+    if not capture.isOpened():
+        raise SystemExit(f"Could not open camera 112 source: {source}")
+    source_fps = capture.get(cv2.CAP_PROP_FPS)
+    fps = source_fps or 25.0
+    if fps <= 0 or fps > 120:
+        fps = 25.0
+    source_is_live = _is_url(source)
+    record_live_mp4 = source_is_live and bool(getattr(settings, "RECORD_LIVE_MP4", True))
+    recording_fps = live_recording_fps(
+        source_fps, getattr(settings, "LIVE_RECORDING_FPS_FALLBACK", 25.0)
+    )
+    total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+    capture.release()
+
+    configured_time = _configured_timestamp(getattr(settings, "TIMESTAMP_112", None))
+    if _is_url(source):
+        clock_112 = datetime.now(BANGKOK_TIMEZONE).replace(tzinfo=None)
+        clock_source_112 = "system_clock_live"
+    else:
+        clock_112, clock_source_112 = resolve_start_timestamp(
+            source, "112", configured_time, Path(settings.LOG_DIRECTORY)
+        )
+    if clock_112 is None and bool(
+        getattr(settings, "USE_SYSTEM_CLOCK_IF_112_TIME_UNAVAILABLE", True)
+    ):
+        clock_112 = datetime.now(BANGKOK_TIMEZONE).replace(tzinfo=None)
+        clock_source_112 = "system_clock_fallback"
+
+    log_root = Path(settings.LOG_DIRECTORY).expanduser()
+    session_started = datetime.now(BANGKOK_TIMEZONE)
+    session_stamp = session_started.strftime("%Y%m%d_%H%M%S")
+    session_dir = log_root / f"{'live' if source_is_live else 'v2'}_{session_stamp}"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    stem_112 = "live_stream_112" if source_is_live else source.stem
+    log_112 = session_dir / f"{session_stamp}_{stem_112}_camera112.jsonl"
+    recording_path = session_dir / f"{session_stamp}_{stem_112}_camera112_{int(recording_fps)}fps.mp4" if record_live_mp4 else None
+
+    enable_udp = bool(getattr(settings, "ENABLE_UDP_PAYLOAD", False))
+    enable_mqtt = bool(getattr(settings, "ENABLE_MQTT_PAYLOAD", False))
+    udp_host = str(getattr(settings, "UDP_HOST", "127.0.0.1"))
+    udp_port = int(getattr(settings, "UDP_PORT", 5005))
+    window_seconds = float(getattr(settings, "WINDOW_SECONDS", 30.0))
+    use_wall_clock = bool(getattr(settings, "USE_WALL_CLOCK_TIME", _is_url(source)))
+
+    mqtt_client = None
+    if enable_mqtt:
+        try:
+            import paho.mqtt.client as mqtt
+
+            try:
+                mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+            except AttributeError:
+                mqtt_client = mqtt.Client()
+            mqtt_client.connect(
+                str(getattr(settings, "MQTT_BROKER", "broker.hivemq.com")),
+                int(getattr(settings, "MQTT_PORT", 1883)),
+                60,
+            )
+            mqtt_client.loop_start()
+        except Exception as err:
+            print(f"[MQTT WARNING] Could not initialize MQTT: {err}", flush=True)
+            mqtt_client = None
+
+    aggregator = (
+        TrafficWindowAggregator(
+            window_seconds=window_seconds,
+            anchor_time=clock_112 or datetime.now(BANGKOK_TIMEZONE),
+            use_wall_clock=use_wall_clock,
+        )
+        if enable_udp or enable_mqtt
+        else None
+    )
+    udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) if enable_udp else None
+
+    track_kwargs: dict[str, Any] = {
+        "source": str(source),
+        "stream": True,
+        "persist": True,
+        "tracker": str(tracker_path),
+        "classes": list(class_map),
+        "conf": float(settings.CONFIDENCE),
+        "iou": float(settings.IOU),
+        "imgsz": int(settings.IMAGE_SIZE),
+        "device": str(getattr(settings, "DEVICE", "mps")),
+        "agnostic_nms": bool(settings.AGNOSTIC_NMS),
+        "save": False,
+        "verbose": False,
+    }
+    if _is_url(source):
+        track_kwargs["stream_buffer"] = True
+
+    results = model.track(**track_kwargs)
+    track_memory: dict[int, TrackState] = {}
+    window_112 = "Camera 112 - Vehicle tracking (v2 schedule only)"
+    cv2.namedWindow(window_112, cv2.WINDOW_NORMAL)
+    video_writer: cv2.VideoWriter | None = None
+
+    print("V2 started: camera 112 only. Lane direction comes from the timetable.")
+    print("Press q in the video window to stop. JSONL is saved after every frame.")
+    print(f"JSONL log: {log_112}")
+    if record_live_mp4:
+        print(f"MP4 recording: {recording_path} ({int(recording_fps)} FPS)")
+    else:
+        print("MP4 recording is disabled by settings or the selected source is not live_stream.")
+    try:
+        with log_112.open("w", encoding="utf-8") as handle_112:
+            for frame_number, result in enumerate(results):
+                elapsed_seconds = frame_number / fps
+                if _is_url(source):
+                    lane_timestamp = datetime.now(BANGKOK_TIMEZONE).replace(tzinfo=None)
+                else:
+                    lane_timestamp = timestamp_at(clock_112, elapsed_seconds)
+                lane_signals = schedule_lane_signals_from_112(
+                    lane_timestamp, clock_source_112
+                )
+                allowed_by_lane = {
+                    lane: str(summary["enforcement_direction"])
+                    for lane, summary in lane_signals.items()
+                }
+                roi_points = bridge_roi(result.orig_img, profile) if bool(settings.BRIDGE_ONLY) else None
+                lane_filter_points = lane_rois(result.orig_img, profile)
+                lane_points = lane_filter_points if bool(settings.SHOW_LANES) else None
+
+                label_overrides, retained_tracks = stabilized_tracks(
+                    result,
+                    class_map,
+                    class_aliases,
+                    roi_points,
+                    lane_filter_points,
+                    track_memory,
+                    frame_number,
+                    int(settings.OCCLUSION_HOLD),
+                    int(settings.MAX_HELD_TRACKS),
+                )
+                direction_by_track = track_directions(track_memory)
+                violations = wrong_way_track_ids(
+                    track_memory,
+                    direction_by_track,
+                    lane_filter_points,
+                    allowed_by_lane,
+                )
+                vehicle_view = annotated_frame(
+                    result,
+                    class_map,
+                    class_aliases,
+                    roi_points,
+                    bool(settings.SHOW_GATES),
+                    label_overrides,
+                    retained_tracks,
+                    lane_points,
+                    lane_signals,
+                    lane_filter_points=lane_filter_points,
+                    alert_wrong_way=bool(settings.WRONG_WAY_ALERTS),
+                    wrong_way_ids=violations,
+                    camera_timestamp=lane_timestamp,
+                )
+                cv2.imshow(window_112, vehicle_view)
+
+                if record_live_mp4:
+                    if video_writer is None:
+                        height, width = vehicle_view.shape[:2]
+                        video_writer = cv2.VideoWriter(
+                            str(recording_path), cv2.VideoWriter_fourcc(*"mp4v"), recording_fps, (width, height)
+                        )
+                        if not video_writer.isOpened():
+                            video_writer.release()
+                            video_writer = None
+                            raise SystemExit(f"Could not create MP4 recording: {recording_path}")
+                    video_writer.write(vehicle_view)
+
+                grouped = grouped_detection(
+                    result,
+                    class_map,
+                    include_track_id=True,
+                    class_aliases=class_aliases,
+                    roi_points=roi_points,
+                    label_overrides=label_overrides,
+                    retained_tracks=retained_tracks,
+                    lane_points=lane_filter_points,
+                    direction_by_track=direction_by_track,
+                    allowed_by_lane=allowed_by_lane,
+                )
+                record_112 = {
+                    "frame": frame_number,
+                    "time_seconds": round(elapsed_seconds, 3),
+                    "recording": {
+                        "enabled": record_live_mp4,
+                        "mp4_file": recording_path.name if recording_path else None,
+                        "fps": int(recording_fps) if record_live_mp4 else None,
+                    },
+                    "mode": "v2_camera112_schedule_only",
+                    "camera_profile": profile,
+                    "camera_timestamp": (
+                        lane_timestamp.isoformat(sep=" ") if lane_timestamp else None
+                    ),
+                    "camera_timestamp_source": clock_source_112,
+                    "timetable_by_lane": {
+                        lane: {
+                            "direction": summary["direction"],
+                            "period": summary["schedule_period"],
+                            "timestamp_source": summary["schedule_timestamp_source"],
+                        }
+                        for lane, summary in lane_signals.items()
+                    },
+                    "lane_signal_fusion": lane_signals,
+                    "lane_directions": {
+                        lane: str(summary["direction"])
+                        for lane, summary in lane_signals.items()
+                    },
+                    "lane_enforcement_directions": allowed_by_lane,
+                    "wrong_way_track_ids": sorted(violations),
+                    "tracks_by_class": grouped,
+                }
+                append_jsonl_record(handle_112, record_112)
+
+                if aggregator:
+                    for payload in aggregator.add_frame(record_112):
+                        if udp_sock:
+                            send_udp_payload(udp_sock, payload, udp_host, udp_port)
+                        if mqtt_client:
+                            send_mqtt_payload(
+                                mqtt_client,
+                                payload,
+                                str(getattr(settings, "MQTT_TOPIC", "traffic/krung_thon_bridge/summary")),
+                            )
+
+                if frame_number % 100 == 0:
+                    progress = f"{frame_number + 1}/{total_frames}" if total_frames > 0 else str(frame_number + 1)
+                    print(f"Displayed {progress} frames", flush=True)
+                if cv2.waitKey(1) & 0xFF in (ord("q"), ord("Q")):
+                    print("Stopped by q. Earlier MP4 frames and JSONL records have already been saved.")
+                    break
+    finally:
+        if aggregator:
+            final_payload = aggregator.flush()
+            if final_payload:
+                if udp_sock:
+                    send_udp_payload(udp_sock, final_payload, udp_host, udp_port)
+                if mqtt_client:
+                    send_mqtt_payload(
+                        mqtt_client,
+                        final_payload,
+                        str(getattr(settings, "MQTT_TOPIC", "traffic/krung_thon_bridge/summary")),
+                    )
+        if udp_sock:
+            udp_sock.close()
+        if mqtt_client:
+            try:
+                mqtt_client.loop_stop()
+                mqtt_client.disconnect()
+            except Exception:
+                pass
+        if video_writer is not None:
+            video_writer.release()
+        cv2.destroyAllWindows()
+
+    print(f"Camera 112 JSONL: {log_112}")
+    if recording_path:
+        print(f"Camera 112 MP4: {recording_path}")
+
+def main() -> None:
+    if len(sys.argv) > 1:
+        raise SystemExit("V2 selects video_files or live_stream in tracking/v2/settings.py. Do not pass command-line sources.")
+    run_v2_single_camera_from_settings()
+
+
+if __name__ == "__main__":
+    main()

@@ -31,7 +31,6 @@ import sys
 import subprocess
 import tempfile
 from collections import Counter, defaultdict, deque
-from zoneinfo import ZoneInfo
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
@@ -52,7 +51,8 @@ LOGGER.setLevel(logging.ERROR)
 # ``tracking`` is intentionally runnable as its own working folder.  Keep the
 # project root importable so its existing region definitions remain available.
 SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = SCRIPT_DIR.parent
+# v1 อยู่ใน tracking/v1 จึงย้อนขึ้นสองระดับเพื่อหารากของโปรเจกต์
+PROJECT_ROOT = SCRIPT_DIR.parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 payload_dir = PROJECT_ROOT / "payload"
@@ -1095,12 +1095,6 @@ def draw_bridge_guides(
             schedule_direction = str(summary.get("schedule_direction", "unknown"))[0].upper()
             schedule_confidence = float(summary.get("schedule_confidence", 0.0))
             source = str(summary.get("source", "unknown"))
-            if source == "schedule_112":
-                period = str(summary.get("schedule_period", "default"))
-                color = {"up": (0, 220, 0), "down": (0, 0, 255)}.get(direction, (0, 220, 220))
-                panel_lines.append((f"L{index} {direction.upper()} | 112 schedule ({period})", color))
-                continue
-
             source_label = {
                 "visual_both": "visual",
                 "visual_147": "147",
@@ -2332,294 +2326,17 @@ def run_live_tracking_from_settings() -> None:
                 pass
         reader_147.close()
         reader_156.close()
-BANGKOK_TIMEZONE = ZoneInfo("Asia/Bangkok")
-
-
-def schedule_lane_signals_from_112(
-    timestamp: datetime | None, timestamp_source: str
-) -> dict[str, dict[str, object]]:
-    """Set all four lane directions from the Krung Thon timetable and camera 112 time."""
-    directions, period = timetable_directions(timestamp)
-    result: dict[str, dict[str, object]] = {}
-    for index in range(1, 5):
-        lane = f"lane_{index}"
-        direction = directions.get(lane, "unknown") if directions else "unknown"
-        result[lane] = {
-            "direction": direction,
-            "enforcement_direction": direction,
-            "source": "schedule_112",
-            "schedule_direction": direction,
-            "schedule_period": period or "unknown",
-            "schedule_timestamp": timestamp.isoformat(sep=" ") if timestamp else None,
-            "schedule_timestamp_source": timestamp_source,
-            "schedule_confidence": 1.0 if timestamp else 0.0,
-        }
-    return result
-
-
-def run_v2_single_camera_from_settings() -> None:
-    """Run v2: camera 112 detects vehicles and its timetable sets lane direction."""
-    import settings
-
-    source_value = getattr(settings, "CAMERA_112_SOURCE", "")
-    source: str | Path = str(source_value) if _is_url(source_value) else Path(source_value).expanduser()
-    model_path = Path(settings.MODEL_PATH).expanduser()
-    tracker_path = Path(settings.TRACKER_PATH).expanduser()
-    if not model_path.exists():
-        raise SystemExit(f"YOLO model not found: {model_path}\nEdit tracking/settings.py and try again.")
-    if not tracker_path.exists():
-        raise SystemExit(f"ByteTrack configuration not found: {tracker_path}\nEdit tracking/settings.py and try again.")
-    if not _is_url(source) and isinstance(source, Path) and not source.exists():
-        raise SystemExit(f"Camera 112 source not found: {source}\nEdit tracking/settings.py and try again.")
-
-    profile = str(settings.PROFILE)
-    if profile not in {PROFILE_TAKSIN, PROFILE_KRUNG_THON}:
-        raise SystemExit("settings.PROFILE must be 'taksin' or 'krung_thon_bridge'.")
-
-    model = YOLO(str(model_path))
-    class_map = vehicle_class_map(model)
-    if not class_map:
-        raise SystemExit("The selected model has no supported vehicle classes.")
-    class_aliases: dict[str, str] = {}
-    if profile == PROFILE_KRUNG_THON:
-        class_aliases["motorcycle"] = "moto"
-    apply_class_aliases(model, class_aliases)
-
-    capture = cv2.VideoCapture(str(source))
-    if not capture.isOpened():
-        raise SystemExit(f"Could not open camera 112 source: {source}")
-    fps = capture.get(cv2.CAP_PROP_FPS) or 25.0
-    if fps <= 0 or fps > 120:
-        fps = 25.0
-    total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
-    capture.release()
-
-    configured_time = _configured_timestamp(getattr(settings, "TIMESTAMP_112", None))
-    if _is_url(source):
-        clock_112 = datetime.now(BANGKOK_TIMEZONE).replace(tzinfo=None)
-        clock_source_112 = "system_clock_live"
-    else:
-        clock_112, clock_source_112 = resolve_start_timestamp(
-            source, "112", configured_time, Path(settings.LOG_DIRECTORY)
-        )
-    if clock_112 is None and bool(
-        getattr(settings, "USE_SYSTEM_CLOCK_IF_112_TIME_UNAVAILABLE", True)
-    ):
-        clock_112 = datetime.now(BANGKOK_TIMEZONE).replace(tzinfo=None)
-        clock_source_112 = "system_clock_fallback"
-
-    log_root = Path(settings.LOG_DIRECTORY).expanduser()
-    session_dir = log_root / datetime.now(BANGKOK_TIMEZONE).strftime("v2_%Y%m%d_%H%M%S")
-    session_dir.mkdir(parents=True, exist_ok=True)
-    stem_112 = "live_stream_112" if _is_url(source) else source.stem
-    log_112 = session_dir / f"{stem_112}_camera112.jsonl"
-
-    enable_udp = bool(getattr(settings, "ENABLE_UDP_PAYLOAD", False))
-    enable_mqtt = bool(getattr(settings, "ENABLE_MQTT_PAYLOAD", False))
-    udp_host = str(getattr(settings, "UDP_HOST", "127.0.0.1"))
-    udp_port = int(getattr(settings, "UDP_PORT", 5005))
-    window_seconds = float(getattr(settings, "WINDOW_SECONDS", 30.0))
-    use_wall_clock = bool(getattr(settings, "USE_WALL_CLOCK_TIME", _is_url(source)))
-
-    mqtt_client = None
-    if enable_mqtt:
-        try:
-            import paho.mqtt.client as mqtt
-
-            try:
-                mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-            except AttributeError:
-                mqtt_client = mqtt.Client()
-            mqtt_client.connect(
-                str(getattr(settings, "MQTT_BROKER", "broker.hivemq.com")),
-                int(getattr(settings, "MQTT_PORT", 1883)),
-                60,
-            )
-            mqtt_client.loop_start()
-        except Exception as err:
-            print(f"[MQTT WARNING] Could not initialize MQTT: {err}", flush=True)
-            mqtt_client = None
-
-    aggregator = (
-        TrafficWindowAggregator(
-            window_seconds=window_seconds,
-            anchor_time=clock_112 or datetime.now(BANGKOK_TIMEZONE),
-            use_wall_clock=use_wall_clock,
-        )
-        if enable_udp or enable_mqtt
-        else None
-    )
-    udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) if enable_udp else None
-
-    track_kwargs: dict[str, Any] = {
-        "source": str(source),
-        "stream": True,
-        "persist": True,
-        "tracker": str(tracker_path),
-        "classes": list(class_map),
-        "conf": float(settings.CONFIDENCE),
-        "iou": float(settings.IOU),
-        "imgsz": int(settings.IMAGE_SIZE),
-        "device": str(getattr(settings, "DEVICE", "mps")),
-        "agnostic_nms": bool(settings.AGNOSTIC_NMS),
-        "save": False,
-        "verbose": False,
-    }
-    if _is_url(source):
-        track_kwargs["stream_buffer"] = True
-
-    results = model.track(**track_kwargs)
-    track_memory: dict[int, TrackState] = {}
-    window_112 = "Camera 112 - Vehicle tracking (v2 schedule only)"
-    cv2.namedWindow(window_112, cv2.WINDOW_NORMAL)
-
-    print("V2 started: camera 112 only. Lane direction comes from the timetable.")
-    print("Press q in the video window to stop. JSONL is saved after every frame.")
-    print(f"JSONL log: {log_112}")
-    try:
-        with log_112.open("w", encoding="utf-8") as handle_112:
-            for frame_number, result in enumerate(results):
-                elapsed_seconds = frame_number / fps
-                if _is_url(source):
-                    lane_timestamp = datetime.now(BANGKOK_TIMEZONE).replace(tzinfo=None)
-                else:
-                    lane_timestamp = timestamp_at(clock_112, elapsed_seconds)
-                lane_signals = schedule_lane_signals_from_112(
-                    lane_timestamp, clock_source_112
-                )
-                allowed_by_lane = {
-                    lane: str(summary["enforcement_direction"])
-                    for lane, summary in lane_signals.items()
-                }
-                roi_points = bridge_roi(result.orig_img, profile) if bool(settings.BRIDGE_ONLY) else None
-                lane_filter_points = lane_rois(result.orig_img, profile)
-                lane_points = lane_filter_points if bool(settings.SHOW_LANES) else None
-
-                label_overrides, retained_tracks = stabilized_tracks(
-                    result,
-                    class_map,
-                    class_aliases,
-                    roi_points,
-                    lane_filter_points,
-                    track_memory,
-                    frame_number,
-                    int(settings.OCCLUSION_HOLD),
-                    int(settings.MAX_HELD_TRACKS),
-                )
-                direction_by_track = track_directions(track_memory)
-                violations = wrong_way_track_ids(
-                    track_memory,
-                    direction_by_track,
-                    lane_filter_points,
-                    allowed_by_lane,
-                )
-                vehicle_view = annotated_frame(
-                    result,
-                    class_map,
-                    class_aliases,
-                    roi_points,
-                    bool(settings.SHOW_GATES),
-                    label_overrides,
-                    retained_tracks,
-                    lane_points,
-                    lane_signals,
-                    lane_filter_points=lane_filter_points,
-                    alert_wrong_way=bool(settings.WRONG_WAY_ALERTS),
-                    wrong_way_ids=violations,
-                    camera_timestamp=lane_timestamp,
-                )
-                cv2.imshow(window_112, vehicle_view)
-
-                grouped = grouped_detection(
-                    result,
-                    class_map,
-                    include_track_id=True,
-                    class_aliases=class_aliases,
-                    roi_points=roi_points,
-                    label_overrides=label_overrides,
-                    retained_tracks=retained_tracks,
-                    lane_points=lane_filter_points,
-                    direction_by_track=direction_by_track,
-                    allowed_by_lane=allowed_by_lane,
-                )
-                record_112 = {
-                    "frame": frame_number,
-                    "time_seconds": round(elapsed_seconds, 3),
-                    "mode": "v2_camera112_schedule_only",
-                    "camera_profile": profile,
-                    "camera_timestamp": (
-                        lane_timestamp.isoformat(sep=" ") if lane_timestamp else None
-                    ),
-                    "camera_timestamp_source": clock_source_112,
-                    "timetable_by_lane": {
-                        lane: {
-                            "direction": summary["direction"],
-                            "period": summary["schedule_period"],
-                            "timestamp_source": summary["schedule_timestamp_source"],
-                        }
-                        for lane, summary in lane_signals.items()
-                    },
-                    "lane_signal_fusion": lane_signals,
-                    "lane_directions": {
-                        lane: str(summary["direction"])
-                        for lane, summary in lane_signals.items()
-                    },
-                    "lane_enforcement_directions": allowed_by_lane,
-                    "wrong_way_track_ids": sorted(violations),
-                    "tracks_by_class": grouped,
-                }
-                append_jsonl_record(handle_112, record_112)
-
-                if aggregator:
-                    for payload in aggregator.add_frame(record_112):
-                        if udp_sock:
-                            send_udp_payload(udp_sock, payload, udp_host, udp_port)
-                        if mqtt_client:
-                            send_mqtt_payload(
-                                mqtt_client,
-                                payload,
-                                str(getattr(settings, "MQTT_TOPIC", "traffic/krung_thon_bridge/summary")),
-                            )
-
-                if frame_number % 100 == 0:
-                    progress = f"{frame_number + 1}/{total_frames}" if total_frames > 0 else str(frame_number + 1)
-                    print(f"Displayed {progress} frames", flush=True)
-                if cv2.waitKey(1) & 0xFF in (ord("q"), ord("Q")):
-                    print("Stopped by q. Earlier JSONL records have already been saved.")
-                    break
-    finally:
-        if aggregator:
-            final_payload = aggregator.flush()
-            if final_payload:
-                if udp_sock:
-                    send_udp_payload(udp_sock, final_payload, udp_host, udp_port)
-                if mqtt_client:
-                    send_mqtt_payload(
-                        mqtt_client,
-                        final_payload,
-                        str(getattr(settings, "MQTT_TOPIC", "traffic/krung_thon_bridge/summary")),
-                    )
-        if udp_sock:
-            udp_sock.close()
-        if mqtt_client:
-            try:
-                mqtt_client.loop_stop()
-                mqtt_client.disconnect()
-            except Exception:
-                pass
         cv2.destroyAllWindows()
 
     print(f"Camera 112 JSONL: {log_112}")
-
-
-
+    print(f"Camera 147 JSONL: {log_147}")
+    print(f"Camera 156 JSONL: {log_156}")
 
 def main() -> None:
     args = parse_args()
-    if args.source is not None:
-        raise SystemExit("V2 reads camera 112 from tracking/settings.py. Do not use --source.")
-    run_v2_single_camera_from_settings()
-    return
+    if args.source is None:
+        run_live_tracking_from_settings()
+        return
 
     if not args.source.exists():
         raise SystemExit(f"Source not found: {args.source}")
