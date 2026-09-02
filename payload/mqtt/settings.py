@@ -9,8 +9,9 @@ STUDENT_ID = "6610301004"
 
 # Tracker publishes one local window each minute to this topic.
 GATEWAY_INPUT_TOPIC = "traffic/krung_thon_bridge/CAM_112/gateway_input"
-# The separate Gateway publishes its five-minute result here.
-SUMMARY_TOPIC = "traffic/krung_thon_bridge/CAM_112/summary"
+# Option A: publish the legacy-compatible envelope that the existing lab
+# pipeline accepts through its ``v1/+`` subscription.
+SUMMARY_TOPIC = f"v1/{STUDENT_ID}"
 
 TRACKER_CLIENT_ID = "vehicle_tracker_CAM_112"
 GATEWAY_CLIENT_ID = "vehicle_gateway_CAM_112"

@@ -32,13 +32,19 @@ def parse_args() -> argparse.Namespace:
 
 
 def print_payload(payload: dict[str, Any], topic: str, byte_count: int, broker: str) -> None:
-    location = payload.get("location", {})
-    traffic = payload.get("traffic", {})
-    wrong_way = payload.get("wrong_way", {})
+    legacy_payload = payload.get("payload") if isinstance(payload.get("payload"), dict) else None
+    location = payload.get("location", {}) if legacy_payload is None else {"site_id": payload.get("place_id")}
+    traffic = payload.get("traffic", {}) if legacy_payload is None else legacy_payload
+    wrong_way = payload.get("wrong_way", {}) if legacy_payload is None else legacy_payload
+    wrong_way_count = (
+        wrong_way.get("count", 0)
+        if legacy_payload is None
+        else wrong_way.get("wrong_way_count", 0)
+    )
     print(
         f"[MQTT IN] broker={broker} | topic={topic} | {byte_count} bytes | "
         f"{location.get('site_id', 'unknown')} | "
-        f"vehicles={traffic.get('vehicle_count', 0)} wrong_way={wrong_way.get('count', 0)}"
+        f"vehicles={traffic.get('vehicle_count', 0)} wrong_way={wrong_way_count}"
     )
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 

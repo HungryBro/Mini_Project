@@ -366,7 +366,10 @@ class TrafficGatewayAggregator:
             "location": self._location,
             "camera_profile": self._camera_profile,
             "lanes": self._lanes,
-            "traffic": {"vehicle_count": vehicle_count},
+            "traffic": {
+                "vehicle_count": vehicle_count,
+                "lane_vehicle_counts": dict(sorted(lane_vehicle_counts.items())),
+            },
             "wrong_way": {
                 "count": len(self._wrong_way_events),
                 "rate_per_100_vehicles": _rate_per_100(

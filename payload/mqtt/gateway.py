@@ -30,15 +30,70 @@ from mqtt.settings import (
 from common.traffic_payload import TrafficGatewayAggregator
 
 
+def to_option_a_payload(summary: dict[str, Any]) -> dict[str, Any]:
+    """Flatten the traffic summary into the legacy ``id/payload`` envelope."""
+    location = summary.get("location") or {}
+    traffic = summary.get("traffic") or {}
+    wrong_way = summary.get("wrong_way") or {}
+    lanes = summary.get("lanes") or {}
+    lane_counts = traffic.get("lane_vehicle_counts") or {}
+    wrong_way_by_lane = wrong_way.get("by_lane") or {}
+
+    payload: dict[str, Any] = {
+        "timestamp": int(summary.get("timestamp_unix", 0)),
+        "timestamp_th": summary.get("timestamp", ""),
+        "window_seconds": float((summary.get("window") or {}).get("seconds", 0.0)),
+        "complete_window": bool((summary.get("window") or {}).get("complete_window", False)),
+        "vehicle_count": int(traffic.get("vehicle_count", 0)),
+        "wrong_way_count": int(wrong_way.get("count", 0)),
+        "wrong_way_rate_per_100_vehicles": float(
+            wrong_way.get("rate_per_100_vehicles", 0.0)
+        ),
+    }
+    for number in range(1, 5):
+        lane_id = f"lane_{number}"
+        lane = lanes.get(lane_id) or {}
+        wrong_way_lane = wrong_way_by_lane.get(lane_id) or {}
+        vehicle_count = int(
+            lane_counts.get(lane_id, wrong_way_lane.get("vehicle_count", 0))
+        )
+        wrong_way_count = int(wrong_way_lane.get("count", 0))
+        payload.update(
+            {
+                f"{lane_id}_direction": str(lane.get("direction", "unknown")),
+                f"{lane_id}_vehicle_count": vehicle_count,
+                f"{lane_id}_wrong_way_count": wrong_way_count,
+                f"{lane_id}_wrong_way_rate_per_100": float(
+                    wrong_way_lane.get("rate_per_100_vehicles", 0.0)
+                ),
+            }
+        )
+
+    return {
+        "id": summary.get("id", f"ID_{summary.get('student_id', '')}"),
+        "name": location.get("camera_id", "CAM_112"),
+        "place_id": location.get("site_id", "krung_thon_bridge"),
+        "payload": payload,
+    }
+
+
 def print_payload(label: str, payload: dict[str, Any], *, topic: str) -> None:
-    window = payload.get("window", {})
-    traffic = payload.get("traffic", {})
-    wrong_way = payload.get("wrong_way", {})
+    legacy = payload.get("payload") if isinstance(payload.get("payload"), dict) else None
+    window = payload.get("window", {}) if legacy is None else {}
+    traffic = payload.get("traffic", {}) if legacy is None else legacy
+    wrong_way = payload.get("wrong_way", {}) if legacy is None else legacy
+    start = window.get("start") if legacy is None else "legacy"
+    end = window.get("end") if legacy is None else legacy.get("timestamp_th")
+    wrong_way_count = (
+        wrong_way.get("count", 0)
+        if legacy is None
+        else wrong_way.get("wrong_way_count", 0)
+    )
     print(
         f"[{label}] topic={topic} "
-        f"{window.get('start')} -> {window.get('end')} "
+        f"{start} -> {end} "
         f"| vehicles={traffic.get('vehicle_count', 0)} "
-        f"wrong_way={wrong_way.get('count', 0)}",
+        f"wrong_way={wrong_way_count}",
         flush=True,
     )
     print(json.dumps(payload, ensure_ascii=False, indent=2), flush=True)
@@ -59,8 +114,11 @@ def main() -> None:
         client = mqtt.Client(client_id=GATEWAY_CLIENT_ID)
 
     def publish_summary(payload: dict[str, Any]) -> None:
-        print_payload("GATEWAY MQTT OUT", payload, topic=SUMMARY_TOPIC)
-        result = client.publish(SUMMARY_TOPIC, json.dumps(payload, ensure_ascii=False), qos=MQTT_QOS)
+        option_a_payload = to_option_a_payload(payload)
+        print_payload("GATEWAY MQTT OUT", option_a_payload, topic=SUMMARY_TOPIC)
+        result = client.publish(
+            SUMMARY_TOPIC, json.dumps(option_a_payload, ensure_ascii=False), qos=MQTT_QOS
+        )
         if result.rc != mqtt.MQTT_ERR_SUCCESS:
             print(f"[MQTT ERROR] Summary publish failed: rc={result.rc}", flush=True)
 

@@ -44,7 +44,7 @@ def connector_config() -> tuple[str, str, dict[str, str]]:
         "tasks.max": "1",
         "mqtt.server.uri": f"tcp://{mqtt_broker}:{mqtt_port}",
         "mqtt.topics": setting(
-            "MQTT_TOPIC", "traffic/krung_thon_bridge/CAM_112/summary"
+            "MQTT_TOPIC", "v1/6610301004"
         ),
         "mqtt.client.id": setting(
             "MQTT_CONNECT_CLIENT_ID", "kafka_connect_traffic_CAM_112"
