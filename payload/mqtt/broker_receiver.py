@@ -4,7 +4,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
+from pathlib import Path
 from typing import Any
+
+PAYLOAD_DIRECTORY = Path(__file__).resolve().parents[1]
+if str(PAYLOAD_DIRECTORY) not in sys.path:
+    sys.path.insert(0, str(PAYLOAD_DIRECTORY))
+
+from mqtt.settings import MQTT_BROKER, MQTT_PORT, SUMMARY_TOPIC
 
 try:
     import paho.mqtt.client as mqtt
@@ -14,10 +22,10 @@ except ImportError:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Receive traffic.v1 JSON payloads over MQTT")
-    parser.add_argument("--broker", default="172.16.2.117", help="MQTT broker host")
-    parser.add_argument("--port", type=int, default=1883, help="MQTT broker port")
+    parser.add_argument("--broker", default=MQTT_BROKER, help="MQTT broker host")
+    parser.add_argument("--port", type=int, default=MQTT_PORT, help="MQTT broker port")
     parser.add_argument(
-        "--topic", default="traffic/krung_thon_bridge/CAM_112/summary", help="MQTT topic to subscribe"
+        "--topic", default=SUMMARY_TOPIC, help="MQTT topic to subscribe"
     )
     parser.add_argument("--once", action="store_true", help="stop after the first valid payload")
     return parser.parse_args()

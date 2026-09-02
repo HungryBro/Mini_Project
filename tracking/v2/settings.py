@@ -66,9 +66,7 @@ WRONG_WAY_GATES_REFERENCE = {
     "G3": ((90, 300), (596, 300)),
 }
 SHOW_WRONG_WAY_GATES = True
-# Print the complete local one-minute gateway JSON payload in the tracker terminal.
-# It is emitted once per completed Gateway window, not once per frame.
-PRINT_GATEWAY_PAYLOAD = True
+# Gateway payload เต็มจะแสดงใน Terminal ที่รัน payload/mqtt/gateway.py.
 # ระยะกันสั่นทั้งสองข้างของแต่ละ Gate (พิกเซลบนภาพอ้างอิง 800x450).
 WRONG_WAY_GATE_MARGIN_PIXELS = 20.0
 # จำนวนเฟรมที่ต้องเคลื่อนสวนเลนต่อหลังข้าม Gate ก่อนแจ้งเตือน.
@@ -96,28 +94,9 @@ RECORD_LIVE_MP4 = True
 # เลือกอัตโนมัติจาก FPS ของกล้อง: 25 FPS จะบันทึก 25 FPS, 30 FPS จะบันทึก 30 FPS.
 LIVE_RECORDING_FPS_FALLBACK = 25.0
 
-# โหมดการส่งข้อมูล Payload ออกไปยังระบบภายนอก
-# เลือกระบุโปรโตคอลที่ต้องการรัน: "udp", "mqtt", "both", หรือ "none"
-PAYLOAD_PROTOCOL = "mqtt"  # เลือกสลับระหว่าง "udp" หรือ "mqtt" ตรงนี้ได้เลย
-
-# The Mac gateway receives a local summary every minute, then sends a combined
-# summary to the cloud MQTT broker every five minutes.
+# Tracker ส่ง Gateway-input payload ผ่าน MQTT ทุก 1 นาทีเท่านั้น.
+# Gateway จะรันแยกที่ payload/mqtt/gateway.py และรวมส่ง summary ทุก 5 นาที.
+ENABLE_MQTT_GATEWAY = True
 GATEWAY_WINDOW_SECONDS = 60.0
-BROKER_WINDOW_SECONDS = 300.0
 # สลับใช้ Wall-clock time อัตโนมัติ: True เมื่อรันกล้องสด (live_stream) และ False เมื่อรันไฟล์คลิปวิดีโอ
 USE_WALL_CLOCK_TIME = str(SOURCE_MODE).lower() in ("live_stream", "stream", "url", "live")
-
-# ตั้งค่าสำหรับ UDP
-UDP_HOST = "127.0.0.1"
-UDP_PORT = 5005
-
-# ตั้งค่าสำหรับ MQTT
-MQTT_BROKER = "172.16.2.117"
-MQTT_PORT = 1883
-MQTT_TOPIC = "traffic/krung_thon_bridge/CAM_112/summary"
-MQTT_CLIENT_ID = "vehicle_gateway_CAM_112"
-MQTT_QOS = 1
-
-# ตัวแปรระบบเปิด/ปิดการทำงานอัตโนมัติตาม PAYLOAD_PROTOCOL
-ENABLE_UDP_PAYLOAD = PAYLOAD_PROTOCOL.lower() in ("udp", "both")
-ENABLE_MQTT_PAYLOAD = PAYLOAD_PROTOCOL.lower() in ("mqtt", "both")

@@ -6,10 +6,15 @@ import argparse
 import json
 from pathlib import Path
 import socket
+import sys
 import time
 from typing import Any
 
-from traffic_payload import TrafficWindowAggregator, parse_start_time
+PAYLOAD_DIRECTORY = Path(__file__).resolve().parents[1]
+if str(PAYLOAD_DIRECTORY) not in sys.path:
+    sys.path.insert(0, str(PAYLOAD_DIRECTORY))
+
+from common.traffic_payload import TrafficWindowAggregator, parse_start_time
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
