@@ -1,7 +1,7 @@
 import cv2
 
 # โหลดภาพเฟรมแรกจากวิดีโอ
-cap = cv2.VideoCapture('/Users/dolphin/Desktop/Mini Project/locations/krung_thon_bridge/v4/raw/krung_thon_bridge_cam112_v4_raw.mp4')
+cap = cv2.VideoCapture('/Users/dolphin/Desktop/Mini Project/locations/krung_thon_bridge/v2_have_wrrongway/krung_thon_bridge_cam112_v2_1min.mp4')
 ret, frame = cap.read()
 cap.release()
 

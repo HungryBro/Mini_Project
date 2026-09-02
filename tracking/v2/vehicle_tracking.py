@@ -47,7 +47,13 @@ if str(payload_dir) not in sys.path:
 
 # pyrefly: ignore [missing-import]
 from traffic_payload import TrafficGatewayAggregator, TrafficWindowAggregator
-from config.krung_thon_bridge_regions import camera_112_lane_rois, camera_112_roi, point_lane
+from config.krung_thon_bridge_regions import (
+    REFERENCE_HEIGHT,
+    REFERENCE_WIDTH,
+    camera_112_lane_rois,
+    camera_112_roi,
+    point_lane,
+)
 
 VEHICLE_NAMES = {
     "car", "motorcycle", "motorbike", "bus", "truck", "pickup", "taxi", "van", "truck trailer",
@@ -230,6 +236,10 @@ class TrackState:
     confidence: float
     vertical_motion: deque[float] = field(default_factory=lambda: deque(maxlen=10))
     wrong_way_consecutive: int = 0
+    gate_side: str | None = None
+    gate_crossing_direction: str | None = None
+    gate_crossing_frame: int | None = None
+    gate_wrong_way_consecutive: int = 0
     wrong_way_event_id: str | None = None
 
 
@@ -262,6 +272,77 @@ def _next_vehicle_id(lane_id: str | None, lane_counters: dict[str, int]) -> str:
     lane_number = re.search(r"(\d+)$", lane_key)
     prefix = f"L{lane_number.group(1)}" if lane_number else "LX"
     return f"{prefix}-V{lane_counters[lane_key]}"
+
+
+def scaled_wrong_way_gate(
+    frame: np.ndarray,
+    reference_gate: object,
+) -> tuple[tuple[int, int], tuple[int, int]] | None:
+    """Scale the two configured 800x450 gate endpoints to this frame."""
+    if not isinstance(reference_gate, (tuple, list)) or len(reference_gate) != 2:
+        return None
+    try:
+        start, end = reference_gate
+        x1, y1 = float(start[0]), float(start[1])
+        x2, y2 = float(end[0]), float(end[1])
+    except (TypeError, IndexError, ValueError):
+        return None
+    height, width = frame.shape[:2]
+    return (
+        (round(x1 * width / REFERENCE_WIDTH), round(y1 * height / REFERENCE_HEIGHT)),
+        (round(x2 * width / REFERENCE_WIDTH), round(y2 * height / REFERENCE_HEIGHT)),
+    )
+
+
+def wrong_way_gate_side(
+    point: tuple[float, float],
+    gate_points: tuple[tuple[int, int], tuple[int, int]],
+    margin_pixels: float,
+) -> str | None:
+    """Return a stable side of the gate, ignoring the margin around its line."""
+    (x1, y1), (x2, y2) = gate_points
+    dx, dy = float(x2 - x1), float(y2 - y1)
+    length_squared = dx * dx + dy * dy
+    if length_squared <= 0:
+        return None
+    projection = ((point[0] - x1) * dx + (point[1] - y1) * dy) / length_squared
+    if projection < 0.0 or projection > 1.0:
+        return None
+    signed_distance = ((point[0] - x1) * dy - (point[1] - y1) * dx) / math.sqrt(length_squared)
+    if signed_distance >= margin_pixels:
+        return "above"
+    if signed_distance <= -margin_pixels:
+        return "below"
+    return None
+
+
+def update_wrong_way_gate_crossings(
+    track_memory: dict[int, TrackState],
+    gate_points: tuple[tuple[int, int], tuple[int, int]] | None,
+    frame_number: int,
+    margin_pixels: float,
+) -> None:
+    """Record only clear crossings from one stable side of the gate to the other."""
+    if gate_points is None:
+        return
+    for state in track_memory.values():
+        if state.last_seen_frame != frame_number:
+            continue
+        x1, _y1, x2, y2 = state.bbox_xyxy
+        side = wrong_way_gate_side(((x1 + x2) / 2, y2), gate_points, margin_pixels)
+        if side is None:
+            continue
+        if state.gate_side is None:
+            state.gate_side = side
+            continue
+        if side == state.gate_side:
+            continue
+        state.gate_crossing_direction = (
+            "up" if state.gate_side == "below" and side == "above" else "down"
+        )
+        state.gate_crossing_frame = frame_number
+        state.gate_side = side
+        state.gate_wrong_way_consecutive = 0
 
 
 def _reassociate_previous_track(
@@ -340,16 +421,20 @@ def confirmed_wrong_way_track_ids(
     frame_number: int,
     confirm_frames: int,
     min_displacement_pixels: float,
+    gate_points: tuple[tuple[int, int], tuple[int, int]] | None,
+    gate_confirm_frames: int,
 ) -> set[int]:
-    """Confirm sustained wrong-way movement before a one-time event is emitted.
+    """Confirm a wrong-way event only after a clear, sustained gate crossing.
 
-    A vehicle may have started driving the wrong way before it entered the
-    camera view.  Once this camera sees enough opposite motion, it receives one
-    event ID based on its stable vehicle ID—not on ByteTrack's temporary number.
+    A box must first cross the configured gate from one stable side to the
+    other in the observed wrong direction.  It must then keep moving that way
+    for more frames.  This rejects short YOLO/ByteTrack position jitter near
+    the small, distant vehicles at the top of the image.
     """
     violations: set[int] = set()
     if not lane_points:
         return violations
+    gate_is_required = gate_points is not None
     for track_id, direction in directions.items():
         state = track_memory.get(track_id)
         if state is None:
@@ -362,14 +447,28 @@ def confirmed_wrong_way_track_ids(
             and expected in {"up", "down"}
             and direction != expected
         )
+        crossed_in_observed_direction = state.gate_crossing_direction == direction
         # A predicted/held box cannot add confirmation frames by itself.
         if state.last_seen_frame == frame_number:
             state.wrong_way_consecutive = (
                 state.wrong_way_consecutive + 1 if moving_wrong_way else 0
             )
+            if moving_wrong_way and (not gate_is_required or crossed_in_observed_direction):
+                state.gate_wrong_way_consecutive += 1
+            elif not moving_wrong_way or gate_is_required:
+                state.gate_wrong_way_consecutive = 0
         vertical_displacement = abs(sum(state.vertical_motion))
+        gate_confirmed = (
+            not gate_is_required
+            or (
+                crossed_in_observed_direction
+                and state.gate_crossing_frame is not None
+                and state.gate_wrong_way_consecutive >= gate_confirm_frames
+            )
+        )
         if (
             moving_wrong_way
+            and gate_confirmed
             and state.wrong_way_consecutive >= confirm_frames
             and vertical_displacement >= min_displacement_pixels
         ):
@@ -568,6 +667,7 @@ def draw_bridge_guides(
     lane_points: dict[str, np.ndarray] | None = None,
     lane_signals: dict[str, dict[str, object]] | None = None,
     camera_timestamp: datetime | None = None,
+    wrong_way_gate: tuple[tuple[int, int], tuple[int, int]] | None = None,
 ) -> None:
     """Draw camera-112 lane regions and timetable directions only."""
     h_frame, w_frame = frame.shape[:2]
@@ -591,6 +691,21 @@ def draw_bridge_guides(
             half_length = max(14, round(h_frame * 0.0475))
             start, end = ((arrow_x, arrow_y + half_length), (arrow_x, arrow_y - half_length)) if direction == "up" else ((arrow_x, arrow_y - half_length), (arrow_x, arrow_y + half_length))
             cv2.arrowedLine(frame, start, end, white, 2, cv2.LINE_AA, tipLength=0.32)
+
+    if wrong_way_gate is not None:
+        gate_start, gate_end = wrong_way_gate
+        gate_color = (0, 220, 220)
+        cv2.line(frame, gate_start, gate_end, gate_color, 2, cv2.LINE_AA)
+        cv2.putText(
+            frame,
+            "WRONG-WAY GATE",
+            (gate_start[0] + 4, min(h_frame - 8, gate_start[1] + 15)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.35,
+            gate_color,
+            1,
+            cv2.LINE_AA,
+        )
 
     if lane_signals:
         timestamp = camera_timestamp or datetime.now().astimezone()
@@ -746,11 +861,20 @@ def annotated_frame(
     wrong_way_ids: set[int] | None = None,
     source_frame: np.ndarray | None = None,
     camera_timestamp: datetime | None = None,
+    wrong_way_gate: tuple[tuple[int, int], tuple[int, int]] | None = None,
 ) -> object:
     """Render boxes and optionally highlight tracked wrong-way vehicles."""
     frame = (source_frame if source_frame is not None else result.orig_img).copy()
     if roi_points is not None:
-        draw_bridge_guides(frame, roi_points, show_gates, lane_points, lane_signals, camera_timestamp=camera_timestamp)
+        draw_bridge_guides(
+            frame,
+            roi_points,
+            show_gates,
+            lane_points,
+            lane_signals,
+            camera_timestamp=camera_timestamp,
+            wrong_way_gate=wrong_way_gate,
+        )
     boxes = result.boxes
     class_aliases = class_aliases or {}
     label_overrides = label_overrides or {}
@@ -1073,6 +1197,13 @@ def run_v2_single_camera_from_settings() -> None:
                 roi_points = bridge_roi(result.orig_img, profile) if bool(settings.BRIDGE_ONLY) else None
                 lane_filter_points = lane_rois(result.orig_img, profile)
                 lane_points = lane_filter_points if bool(settings.SHOW_LANES) else None
+                wrong_way_gate = scaled_wrong_way_gate(
+                    result.orig_img,
+                    getattr(settings, "WRONG_WAY_GATE_REFERENCE", None),
+                )
+                gate_margin_pixels = float(
+                    getattr(settings, "WRONG_WAY_GATE_MARGIN_PIXELS", 20.0)
+                ) * result.orig_img.shape[0] / REFERENCE_HEIGHT
 
                 label_overrides, retained_tracks, vehicle_ids = stabilized_tracks(
                     result,
@@ -1089,6 +1220,12 @@ def run_v2_single_camera_from_settings() -> None:
                     float(getattr(settings, "VEHICLE_ID_MAX_CENTER_DISTANCE", 70.0)),
                     float(getattr(settings, "VEHICLE_ID_MIN_IOU", 0.05)),
                 )
+                update_wrong_way_gate_crossings(
+                    track_memory,
+                    wrong_way_gate,
+                    frame_number,
+                    gate_margin_pixels,
+                )
                 direction_by_track = track_directions(track_memory)
                 violations = confirmed_wrong_way_track_ids(
                     track_memory,
@@ -1096,8 +1233,10 @@ def run_v2_single_camera_from_settings() -> None:
                     lane_filter_points,
                     allowed_by_lane,
                     frame_number,
-                    int(getattr(settings, "WRONG_WAY_CONFIRM_FRAMES", 6)),
-                    float(getattr(settings, "WRONG_WAY_MIN_DISPLACEMENT_PIXELS", 12.0)),
+                    int(getattr(settings, "WRONG_WAY_CONFIRM_FRAMES", 12)),
+                    float(getattr(settings, "WRONG_WAY_MIN_DISPLACEMENT_PIXELS", 24.0)),
+                    wrong_way_gate,
+                    int(getattr(settings, "WRONG_WAY_GATE_CONFIRM_FRAMES", 12)),
                 )
                 wrong_way_event_ids_by_track = {
                     track_id: state.wrong_way_event_id
@@ -1121,6 +1260,11 @@ def run_v2_single_camera_from_settings() -> None:
                     alert_wrong_way=bool(settings.WRONG_WAY_ALERTS),
                     wrong_way_ids=violations,
                     camera_timestamp=lane_timestamp,
+                    wrong_way_gate=(
+                        wrong_way_gate
+                        if bool(getattr(settings, "SHOW_WRONG_WAY_GATE", True))
+                        else None
+                    ),
                 )
                 cv2.imshow(window_112, vehicle_view)
 
