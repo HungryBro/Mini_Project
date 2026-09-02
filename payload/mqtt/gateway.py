@@ -61,7 +61,9 @@ def main() -> None:
             print(f"[MQTT ERROR] Summary publish failed: rc={result.rc}", flush=True)
 
     def on_connect(client: mqtt.Client, userdata: Any, flags: Any, reason_code: Any, properties: Any = None) -> None:
-        if int(reason_code) == 0:
+        # paho-mqtt 2.x passes a ReasonCode object here.  It compares safely
+        # with 0, while int(ReasonCode) raises TypeError on recent releases.
+        if reason_code == 0:
             client.subscribe(GATEWAY_INPUT_TOPIC, qos=MQTT_QOS)
             print("==================================================")
             print(" MQTT Gateway started")
