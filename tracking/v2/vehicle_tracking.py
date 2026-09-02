@@ -256,12 +256,12 @@ def _predicted_box(state: TrackState, missed_frames: int) -> list[float]:
 
 
 def _next_vehicle_id(lane_id: str | None, lane_counters: dict[str, int]) -> str:
-    """Create a human-readable lane-local ID, for example ``L2-V004``."""
+    """Create a human-readable lane-local ID, for example ``L2-V4``."""
     lane_key = lane_id or "lane_unknown"
     lane_counters[lane_key] += 1
     lane_number = re.search(r"(\d+)$", lane_key)
     prefix = f"L{lane_number.group(1)}" if lane_number else "LX"
-    return f"{prefix}-V{lane_counters[lane_key]:03d}"
+    return f"{prefix}-V{lane_counters[lane_key]}"
 
 
 def _reassociate_previous_track(
@@ -456,7 +456,7 @@ def stabilized_tracks(
                 state.confidence = confidence
             if state.home_lane_id is None and lane_id:
                 state.home_lane_id = lane_id
-            label_overrides[track_id] = f"vehicle {state.vehicle_id}"
+            label_overrides[track_id] = state.vehicle_id
             seen_ids.add(track_id)
 
     retained_candidates: list[tuple[int, int, float, dict[str, object]]] = []
@@ -486,7 +486,7 @@ def stabilized_tracks(
                             "track_id": track_id,
                             "vehicle_id": state.vehicle_id,
                             "wrong_way_event_id": state.wrong_way_event_id,
-                            "label": f"vehicle {state.vehicle_id}",
+                            "label": state.vehicle_id,
                             "bbox_xyxy": predicted,
                             "bottom_center": bottom_center,
                         },

@@ -50,7 +50,7 @@ WRONG_WAY_ALERTS = True
 OCCLUSION_HOLD = 8
 MAX_HELD_TRACKS = 3
 
-# ID ของ vehicle จะแยกเลขตามเลน เช่น L1-V001 และพยายามเชื่อม ID เดิม
+# ID ของ vehicle จะแยกเลขตามเลน เช่น L1-V1 และพยายามเชื่อม ID เดิม
 # เมื่อ ByteTrack หลุดเพราะรถบังกันชั่วคราว. ค่าระยะเป็นพิกเซลของภาพกล้อง 112.
 VEHICLE_ID_REASSOCIATE_SECONDS = 2.0
 VEHICLE_ID_MAX_CENTER_DISTANCE = 70.0
