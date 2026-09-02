@@ -1,0 +1,9 @@
+services:
+  traffic-telegraf:
+    image: telegraf:1.39
+    container_name: krung-thon-traffic-telegraf
+    env_file:
+      - .env
+    volumes:
+      - ./telegraf.conf:/etc/telegraf/telegraf.conf:ro
+    restart: unless-stopped

@@ -10,10 +10,11 @@ payload/
 │   └── broker_receiver.py   # ดู Summary ที่ Broker (ไม่บังคับ)
 ├── common/
 │   └── traffic_payload.py   # รูปแบบ payload + ตัวรวมข้อมูลที่ MQTT Gateway ใช้
-├── udp/
-│   └── receiver.py          # เครื่องมือ UDP เก่า แยกไว้ ไม่ถูกใช้ใน V2
 └── tools/
     └── replay_traffic_payload.py  # เล่น JSONL เก่าย้อนหลัง (เครื่องมือเสริม)
+
+archive/
+└── udp/                     # UDP เก่า ไม่ถูกใช้ใน V2 MQTT flow
 ```
 
 V2 ใช้ MQTT เท่านั้น:
@@ -52,3 +53,9 @@ python3 mqtt/broker_receiver.py
 แก้ Broker, port และ topics ที่ `mqtt/settings.py` เพียงไฟล์เดียว. หาก Gateway
 หรือ Tracker แจ้ง timeout ให้เชื่อมต่อเครือข่ายที่เข้าถึง Broker
 `172.16.2.117:1883` ก่อน.
+
+## สถานะไฟล์
+
+`common/traffic_payload.py` ยังใช้งานอยู่โดยทั้ง Tracker และ MQTT Gateway
+จึงไม่ย้ายไป archive. ส่วน `archive/udp/` เป็นโค้ด UDP เก่าที่เก็บไว้เผื่อ
+อ้างอิงเท่านั้น และไม่ถูกเรียกใช้ใน V2.

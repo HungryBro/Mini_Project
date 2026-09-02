@@ -18,3 +18,6 @@ map/
 
 # Local planning notes
 Project_Plan.md
+
+# Local integration credentials
+.env
