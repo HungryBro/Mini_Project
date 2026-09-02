@@ -17,7 +17,7 @@ TRACKING_DIRECTORY = Path(__file__).resolve().parent
 PROJECT_DIRECTORY = TRACKING_DIRECTORY.parents[1]
 
 # โหมดแหล่งข้อมูลวิดีโอ ("video_files" หรือ "live_stream")
-SOURCE_MODE = "live_stream"  # ใช้ "video_files" เมื่อต้องการทดสอบจากคลิปในเครื่อง
+SOURCE_MODE = "video_files"  # ใช้ "video_files" เมื่อต้องการทดสอบจากคลิปในเครื่อง
 
 # ลิงก์สตรีมสด HLS (.m3u8) ของกล้อง 112
 CAMERA_112_STREAM_URL = "https://drr-kt-svr02.enixma.net/live/192.168.8.112.stream/playlist.m3u8"
@@ -57,11 +57,19 @@ VEHICLE_ID_MAX_CENTER_DISTANCE = 70.0
 VEHICLE_ID_MIN_IOU = 0.05
 
 # Gate ยืนยันรถย้อนศรบนภาพอ้างอิงของกล้อง 112 (800x450).
-# ระบบยังตรวจจับและ track ทั้ง 4 เลนเหมือนเดิม แต่จะขึ้นแจ้งย้อนศรต่อเมื่อ
-# รถข้ามเส้นนี้ไปในทิศสวนเลนจริง แล้วเคลื่อนต่อเนื่องหลังข้ามเส้น.
-WRONG_WAY_GATE_REFERENCE = ((272, 88), (467, 86))
-SHOW_WRONG_WAY_GATE = True
-# ระยะกันสั่นทั้งสองข้างของเส้น Gate (พิกเซลบนภาพอ้างอิง 800x450).
+# รถยังตรวจจับและ track ทั้ง 4 เลนตามเดิม แต่ข้าม Gate ใด Gate หนึ่งในทิศ
+# สวนเลน แล้วเคลื่อนต่อเนื่องหลังข้ามเส้น จึงแจ้งเป็นรถย้อนศรเพียงครั้งเดียวต่อ ID.
+# G1 คือเส้นที่ปักไว้เดิม; G2/G3 วางตามแนวขอบถนนช่วงกลางและช่วงล่างของภาพ.
+WRONG_WAY_GATES_REFERENCE = {
+    "G1": ((272, 88), (467, 86)),
+    "G2": ((193, 180), (522, 180)),
+    "G3": ((90, 300), (596, 300)),
+}
+SHOW_WRONG_WAY_GATES = True
+# Print the complete local one-minute gateway JSON payload in the tracker terminal.
+# It is emitted once per completed Gateway window, not once per frame.
+PRINT_GATEWAY_PAYLOAD = True
+# ระยะกันสั่นทั้งสองข้างของแต่ละ Gate (พิกเซลบนภาพอ้างอิง 800x450).
 WRONG_WAY_GATE_MARGIN_PIXELS = 20.0
 # จำนวนเฟรมที่ต้องเคลื่อนสวนเลนต่อหลังข้าม Gate ก่อนแจ้งเตือน.
 WRONG_WAY_GATE_CONFIRM_FRAMES = 12
@@ -73,7 +81,7 @@ WRONG_WAY_MIN_DISPLACEMENT_PIXELS = 24.0
 
 # ใช้ None เพื่อให้อ่านเวลา OSD บนภาพวิดีโอ/สตรีมให้อัตโนมัติ
 # หากวิดีโอไม่มีข้อความเวลา หรือต้องการระบุเวลาเริ่มต้นเอง สามารถใส่สตริง เช่น "2026-08-26 07:47:28" ได้
-TIMESTAMP_112 = None
+TIMESTAMP_112 = "2026-09-01 15:45:00" # None
 
 # ถ้า OCR เวลาในกล้อง 112 ไม่ได้ ให้ใช้เวลาปัจจุบันของเครื่อง (เวลาไทย)
 # เพื่อเลือกตารางเลนแทน. False = ระบุทิศทางเป็น unknown เพื่อความปลอดภัย.
