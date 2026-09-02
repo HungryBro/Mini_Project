@@ -1073,10 +1073,16 @@ def run_v2_single_camera_from_settings() -> None:
     total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
     capture.release()
 
+    live_override_raw = getattr(settings, "LIVE_STREAM_OVERRIDE_TIME", None)
+    live_override_time = _configured_timestamp(live_override_raw) if live_override_raw is not None else None
     configured_time = _configured_timestamp(getattr(settings, "TIMESTAMP_112", None))
     if _is_url(source):
-        clock_112 = datetime.now(BANGKOK_TIMEZONE).replace(tzinfo=None)
-        clock_source_112 = "system_clock_live"
+        if live_override_time is not None:
+            clock_112 = live_override_time
+            clock_source_112 = "live_stream_override"
+        else:
+            clock_112 = datetime.now(BANGKOK_TIMEZONE).replace(tzinfo=None)
+            clock_source_112 = "system_clock_live"
     else:
         clock_112, clock_source_112 = resolve_start_timestamp(
             source, "112", configured_time, Path(settings.LOG_DIRECTORY)
@@ -1098,7 +1104,10 @@ def run_v2_single_camera_from_settings() -> None:
 
     enable_mqtt_gateway = bool(getattr(settings, "ENABLE_MQTT_GATEWAY", True))
     gateway_window_seconds = float(getattr(settings, "GATEWAY_WINDOW_SECONDS", 15.0))
-    use_wall_clock = bool(getattr(settings, "USE_WALL_CLOCK_TIME", _is_url(source)))
+    if _is_url(source) and live_override_time is not None:
+        use_wall_clock = False
+    else:
+        use_wall_clock = bool(getattr(settings, "USE_WALL_CLOCK_TIME", _is_url(source)))
 
     mqtt_client = None
     if enable_mqtt_gateway:
@@ -1181,7 +1190,7 @@ def run_v2_single_camera_from_settings() -> None:
         with log_112.open("w", encoding="utf-8") as handle_112:
             for frame_number, result in enumerate(results):
                 elapsed_seconds = frame_number / fps
-                if _is_url(source):
+                if _is_url(source) and live_override_time is None:
                     lane_timestamp = datetime.now(BANGKOK_TIMEZONE).replace(tzinfo=None)
                 else:
                     lane_timestamp = timestamp_at(clock_112, elapsed_seconds)
