@@ -52,6 +52,7 @@ from mqtt.settings import (
     MQTT_BROKER,
     MQTT_PORT,
     MQTT_QOS,
+    STUDENT_ID,
     TRACKER_CLIENT_ID,
 )
 from config.krung_thon_bridge_regions import (
@@ -1132,6 +1133,7 @@ def run_v2_single_camera_from_settings() -> None:
     gateway_input_aggregator = (
         TrafficWindowAggregator(
             window_seconds=gateway_window_seconds,
+            student_id=STUDENT_ID,
             anchor_time=clock_112 or datetime.now(BANGKOK_TIMEZONE),
             use_wall_clock=use_wall_clock,
         )

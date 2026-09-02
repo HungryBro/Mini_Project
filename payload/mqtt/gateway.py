@@ -24,6 +24,7 @@ from mqtt.settings import (
     MQTT_BROKER,
     MQTT_PORT,
     MQTT_QOS,
+    STUDENT_ID,
     SUMMARY_TOPIC,
 )
 from common.traffic_payload import TrafficGatewayAggregator
@@ -44,7 +45,10 @@ def print_payload(label: str, payload: dict[str, Any], *, topic: str) -> None:
 
 
 def main() -> None:
-    aggregator = TrafficGatewayAggregator(window_seconds=GATEWAY_CLOUD_WINDOW_SECONDS)
+    aggregator = TrafficGatewayAggregator(
+        window_seconds=GATEWAY_CLOUD_WINDOW_SECONDS,
+        student_id=STUDENT_ID,
+    )
 
     try:
         client = mqtt.Client(

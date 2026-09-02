@@ -51,6 +51,7 @@ class TrafficWindowAggregator:
     site_id: str = "krung_thon_bridge"
     site_name: str = "Krung Thon Bridge"
     camera_name: str = "Main traffic camera"
+    student_id: str = ""
     anchor_time: datetime = field(default_factory=lambda: parse_start_time(None))
     use_wall_clock: bool = False
 
@@ -138,6 +139,7 @@ class TrafficWindowAggregator:
         elapsed_sec = round(window_end - self._window_start, 3)
 
         payload = {
+            "student_id": self.student_id,
             "timestamp": end_dt.isoformat(timespec="seconds"),
             "timestamp_unix": int(end_dt.timestamp()),
             "window": {
@@ -252,11 +254,13 @@ class TrafficGatewayAggregator:
     """Combine one-minute local gateway inputs into one-minute cloud payloads."""
 
     window_seconds: float = 60.0
+    student_id: str = ""
 
     _window_start: datetime | None = field(default=None, init=False)
     _window_end: datetime | None = field(default=None, init=False)
     _covered_seconds: float = field(default=0.0, init=False)
     _location: dict[str, Any] = field(default_factory=dict, init=False)
+    _payload_student_id: str = field(default="", init=False)
     _camera_profile: str = field(default="krung_thon_bridge", init=False)
     _lanes: dict[str, dict[str, Any]] = field(default_factory=dict, init=False)
     _lane_signature: tuple[tuple[str, str], ...] = field(default=(), init=False)
@@ -339,6 +343,7 @@ class TrafficGatewayAggregator:
             )
 
         payload = {
+            "student_id": self._payload_student_id or self.student_id,
             "timestamp": self._window_end.isoformat(timespec="seconds"),
             "timestamp_unix": int(self._window_end.timestamp()),
             "window": {
@@ -371,6 +376,7 @@ class TrafficGatewayAggregator:
     ) -> None:
         self._window_start = _parse_iso_time(payload["window"]["start"])
         self._location = dict(payload.get("location") or {})
+        self._payload_student_id = str(payload.get("student_id") or self.student_id)
         self._camera_profile = str(payload.get("camera_profile", self._camera_profile))
         self._lanes = lanes
         self._lane_signature = signature
@@ -392,6 +398,7 @@ class TrafficGatewayAggregator:
         self._window_end = None
         self._covered_seconds = 0.0
         self._location = {}
+        self._payload_student_id = ""
         self._lanes = {}
         self._lane_signature = ()
         self._vehicles.clear()
