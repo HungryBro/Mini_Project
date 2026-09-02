@@ -1,7 +1,7 @@
 """Build local gateway summaries from ``vehicle_tracking`` JSONL records.
 
-The tracker feeds a one-minute window into the Mac gateway. The gateway then
-combines those windows into one five-minute MQTT summary for the cloud broker.
+The tracker feeds 15-second windows into the Mac gateway. The gateway then
+combines those windows into one one-minute MQTT summary for the cloud broker.
 """
 
 from __future__ import annotations
@@ -44,9 +44,9 @@ def _rate_per_100(numerator: int, denominator: int) -> float:
 
 @dataclass
 class TrafficWindowAggregator:
-    """Turn per-frame tracker records into one-minute gateway input payloads."""
+    """Turn per-frame tracker records into 15-second gateway input payloads."""
 
-    window_seconds: float = 60.0
+    window_seconds: float = 15.0
     camera_id: str = "CAM_112"
     site_id: str = "krung_thon_bridge"
     site_name: str = "Krung Thon Bridge"
@@ -66,7 +66,7 @@ class TrafficWindowAggregator:
         self.anchor_time = _as_bangkok(self.anchor_time)
 
     def add_frame(self, record: dict[str, Any]) -> list[dict[str, Any]]:
-        """Add one tracker record and return any complete one-minute windows."""
+        """Add one tracker record and return any complete 15-second windows."""
         completed: list[dict[str, Any]] = []
         incoming_lanes = self._normalized_lanes(record.get("lane_signal_fusion") or {})
 
@@ -157,7 +157,7 @@ class TrafficWindowAggregator:
             "traffic": {
                 "vehicle_count": len(self._vehicles),
                 "lane_vehicle_counts": self._lane_vehicle_counts(),
-                # Local-only details let the five-minute gateway count a car
+                # Local-only details let the one-minute gateway count a car
                 # that remains in view across minute boundaries only once.
                 # They are stripped before the cloud MQTT publish.
                 "vehicle_ids": sorted(self._vehicles),
@@ -249,9 +249,9 @@ class TrafficWindowAggregator:
 
 @dataclass
 class TrafficGatewayAggregator:
-    """Combine one-minute local gateway inputs into five-minute cloud payloads."""
+    """Combine one-minute local gateway inputs into one-minute cloud payloads."""
 
-    window_seconds: float = 300.0
+    window_seconds: float = 60.0
 
     _window_start: datetime | None = field(default=None, init=False)
     _window_end: datetime | None = field(default=None, init=False)

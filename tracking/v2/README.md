@@ -33,9 +33,9 @@ python3 vehicle_tracking.py
 
 ## MQTT แบบแยก Gateway
 
-V2 ไม่ใช้ UDP แล้ว โดย Tracker จะส่ง Gateway-input ทุก 1 นาทีไปยัง MQTT topic
+V2 ไม่ใช้ UDP แล้ว โดย Tracker จะส่ง Gateway-input ทุก 15 วินาทีไปยัง MQTT topic
 `traffic/krung_thon_bridge/CAM_112/gateway_input` ส่วน Gateway ที่รันแยกจะรับ
-ข้อมูลนี้ แสดง JSON เต็ม และรวมเป็น Cloud summary ทุก 5 นาทีไปยัง topic
+ข้อมูลนี้ แสดง JSON เต็ม และรวมเป็น Cloud summary ทุก 1 นาทีไปยัง topic
 `traffic/krung_thon_bridge/CAM_112/summary`
 
 เปิด Gateway ก่อนใน Terminal แรก:

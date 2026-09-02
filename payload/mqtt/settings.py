@@ -11,4 +11,4 @@ SUMMARY_TOPIC = "traffic/krung_thon_bridge/CAM_112/summary"
 
 TRACKER_CLIENT_ID = "vehicle_tracker_CAM_112"
 GATEWAY_CLIENT_ID = "vehicle_gateway_CAM_112"
-GATEWAY_CLOUD_WINDOW_SECONDS = 300.0
+GATEWAY_CLOUD_WINDOW_SECONDS = 60.0

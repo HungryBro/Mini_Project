@@ -94,9 +94,9 @@ RECORD_LIVE_MP4 = True
 # เลือกอัตโนมัติจาก FPS ของกล้อง: 25 FPS จะบันทึก 25 FPS, 30 FPS จะบันทึก 30 FPS.
 LIVE_RECORDING_FPS_FALLBACK = 25.0
 
-# Tracker ส่ง Gateway-input payload ผ่าน MQTT ทุก 1 นาทีเท่านั้น.
-# Gateway จะรันแยกที่ payload/mqtt/gateway.py และรวมส่ง summary ทุก 5 นาที.
+# Tracker ส่ง Gateway-input payload ผ่าน MQTT ทุก 15 วินาทีเท่านั้น.
+# Gateway จะรันแยกที่ payload/mqtt/gateway.py และรวมส่ง summary ทุก 1 นาที.
 ENABLE_MQTT_GATEWAY = True
-GATEWAY_WINDOW_SECONDS = 60.0
+GATEWAY_WINDOW_SECONDS = 15.0
 # สลับใช้ Wall-clock time อัตโนมัติ: True เมื่อรันกล้องสด (live_stream) และ False เมื่อรันไฟล์คลิปวิดีโอ
 USE_WALL_CLOCK_TIME = str(SOURCE_MODE).lower() in ("live_stream", "stream", "url", "live")

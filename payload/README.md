@@ -6,7 +6,7 @@
 payload/
 ├── mqtt/
 │   ├── settings.py          # Broker, topics และ MQTT IDs (ที่ใช้งานจริง)
-│   ├── gateway.py           # Gateway: รับ 1 นาที → รวม/ส่ง Summary 5 นาที
+│   ├── gateway.py           # Gateway: รับ 15 วินาที → รวม/ส่ง Summary 1 นาที
 │   └── broker_receiver.py   # ดู Summary ที่ Broker (ไม่บังคับ)
 ├── common/
 │   └── traffic_payload.py   # รูปแบบ payload + ตัวรวมข้อมูลที่ MQTT Gateway ใช้
@@ -20,15 +20,15 @@ V2 ใช้ MQTT เท่านั้น:
 
 ```text
 Tracker (camera 112)
-  └─ every 1 minute → traffic/krung_thon_bridge/CAM_112/gateway_input
+  └─ every 15 seconds → traffic/krung_thon_bridge/CAM_112/gateway_input
        └─ MQTT Gateway
-            └─ every 5 minutes → traffic/krung_thon_bridge/CAM_112/summary
+            └─ every 1 minute → traffic/krung_thon_bridge/CAM_112/summary
 ```
 
 ## Terminal 1 — MQTT Gateway
 
-เปิดก่อนเสมอ เพื่อรับ Gateway-input, แสดง JSON เต็มทุก 1 นาที และส่ง
-summary ออกทุก 5 นาที:
+เปิดก่อนเสมอ เพื่อรับ Gateway-input, แสดง JSON เต็มทุก 15 วินาที และส่ง
+summary ออกทุก 1 นาที:
 
 ```bash
 cd "/Users/dolphin/Desktop/Mini Project/payload"

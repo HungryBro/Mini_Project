@@ -1,7 +1,7 @@
 """Separate MQTT Gateway for the Krung Thon Bridge V2 Tracker.
 
-Subscribes to the Tracker's one-minute gateway-input topic, prints the complete
-payload, combines five minutes of traffic, then publishes one cloud summary.
+Subscribes to the Tracker's 15-second gateway-input topic, prints the complete
+payload, combines one minute of traffic, then publishes one cloud summary.
 """
 
 from __future__ import annotations
@@ -67,8 +67,8 @@ def main() -> None:
             client.subscribe(GATEWAY_INPUT_TOPIC, qos=MQTT_QOS)
             print("==================================================")
             print(" MQTT Gateway started")
-            print(f" Input topic : {GATEWAY_INPUT_TOPIC} (every 1 minute)")
-            print(f" Output topic: {SUMMARY_TOPIC} (every 5 minutes)")
+            print(f" Input topic : {GATEWAY_INPUT_TOPIC} (every 15 seconds)")
+            print(f" Output topic: {SUMMARY_TOPIC} (every 1 minute)")
             print(" Press Ctrl+C to stop")
             print("==================================================", flush=True)
         else:

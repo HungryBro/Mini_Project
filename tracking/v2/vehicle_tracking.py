@@ -1097,7 +1097,7 @@ def run_v2_single_camera_from_settings() -> None:
     recording_path = session_dir / f"{session_stamp}_{stem_112}_camera112_{int(recording_fps)}fps.mp4" if record_live_mp4 else None
 
     enable_mqtt_gateway = bool(getattr(settings, "ENABLE_MQTT_GATEWAY", True))
-    gateway_window_seconds = float(getattr(settings, "GATEWAY_WINDOW_SECONDS", 60.0))
+    gateway_window_seconds = float(getattr(settings, "GATEWAY_WINDOW_SECONDS", 15.0))
     use_wall_clock = bool(getattr(settings, "USE_WALL_CLOCK_TIME", _is_url(source)))
 
     mqtt_client = None
