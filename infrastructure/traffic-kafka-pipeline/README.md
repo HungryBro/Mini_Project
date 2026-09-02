@@ -10,7 +10,7 @@ vehicle_tracking.py
   -> Kafka Connect MQTT Source
   -> Kafka topic traffic.krung_thon_bridge.summary.v1
   -> Telegraf Kafka Consumer
-  -> InfluxDB 172.16.2.117:8086 / iot_data
+  -> InfluxDB 172.16.2.117:8086 / mini_project
   -> Grafana
 ```
 
@@ -26,8 +26,8 @@ cd "/Users/dolphin/Desktop/Mini Project/infrastructure/traffic-kafka-pipeline"
 cp .env.example .env
 ```
 
-เปิด `.env` แล้วแทน `INFLUX_TOKEN` ด้วย token ที่มีสิทธิ์เขียน bucket
-`iot_data` ห้ามส่ง token ลง Git หรือวางในแชต
+เปิด `.env` แล้วแทน `INFLUX_TOKEN` ด้วย token ที่อาจารย์ให้ และคง
+`INFLUX_BUCKET=mini_project` ไว้ ห้ามส่ง token ลง Git หรือวางในแชต
 
 ## 2. เปิด Kafka pipeline
 
@@ -64,13 +64,17 @@ docker compose exec kafka kafka-console-consumer \
 ## 5. ตรวจ InfluxDB
 
 Telegraf จะอ่าน Kafka และเขียน measurement `traffic_summary` ลง bucket
-`iot_data` อัตโนมัติ ตรวจด้วย Flux:
+`mini_project` อัตโนมัติ ตรวจด้วย Flux:
 
 ```flux
-from(bucket: "iot_data")
+from(bucket: "mini_project")
   |> range(start: -1h)
   |> filter(fn: (r) => r._measurement == "traffic_summary")
 ```
+
+ข้อมูลแต่ละชุดมี Influx tag `id = ID_6610301004` เพื่อแยกข้อมูลของงานนี้
+ออกจากสมาชิกคนอื่นใน bucket เดียวกัน ส่วน `camera_id = CAM_112` ยังระบุกล้อง
+ตามปกติ
 
 ดู logs ของ Telegraf เมื่อข้อมูลไม่เข้า:
 

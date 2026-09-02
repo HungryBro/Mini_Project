@@ -42,6 +42,14 @@ def _rate_per_100(numerator: int, denominator: int) -> float:
     return round((numerator / denominator) * 100, 2) if denominator else 0.0
 
 
+def _influx_id(student_id: str) -> str:
+    """Return the common bucket tag format, e.g. ``ID_6610301004``."""
+    value = str(student_id).strip()
+    if not value:
+        return ""
+    return value if value.startswith("ID_") else f"ID_{value}"
+
+
 @dataclass
 class TrafficWindowAggregator:
     """Turn per-frame tracker records into 15-second gateway input payloads."""
@@ -139,6 +147,7 @@ class TrafficWindowAggregator:
         elapsed_sec = round(window_end - self._window_start, 3)
 
         payload = {
+            "id": _influx_id(self.student_id),
             "student_id": self.student_id,
             "timestamp": end_dt.isoformat(timespec="seconds"),
             "timestamp_unix": int(end_dt.timestamp()),
@@ -343,6 +352,7 @@ class TrafficGatewayAggregator:
             )
 
         payload = {
+            "id": _influx_id(self._payload_student_id or self.student_id),
             "student_id": self._payload_student_id or self.student_id,
             "timestamp": self._window_end.isoformat(timespec="seconds"),
             "timestamp_unix": int(self._window_end.timestamp()),
