@@ -76,6 +76,18 @@ from(bucket: "mini_project")
 ออกจากสมาชิกคนอื่นใน bucket เดียวกัน ส่วน `camera_id = CAM_112` ยังระบุกล้อง
 ตามปกติ
 
+ค่าที่ทำกราฟได้ทั้งหมดถูกเก็บเป็นตัวเลข โดยเฉพาะแผนทิศทางของเลน:
+
+```text
+lane_N_direction_value: up = 1, down = 0
+complete_window_value:   ครบ 1 นาที = 1, ข้อมูลช่วงสุดท้าย = 0
+```
+
+`complete_window` แบบ true/false ยังคงอยู่เพื่อให้เข้ากันกับข้อมูลเก่า แต่เวลาทำ
+กราฟให้เลือก `complete_window_value` แทน ส่วน `lane_N_direction` แบบข้อความยังคง
+เป็น Influx tag เพื่อใช้กรองข้อมูล เช่น
+เลือกเฉพาะช่วงที่ `lane_1_direction = up` ใน Grafana หรือ Data Explorer
+
 ดู logs ของ Telegraf เมื่อข้อมูลไม่เข้า:
 
 ```bash

@@ -1015,16 +1015,23 @@ def schedule_lane_signals_from_112(
 ) -> dict[str, dict[str, object]]:
     """Set all four lane directions from the Krung Thon timetable and camera 112 time."""
     directions, period = timetable_directions(timestamp)
+    if directions is None:
+        raise RuntimeError("Krung Thon timetable did not return lane directions")
     result: dict[str, dict[str, object]] = {}
     for index in range(1, 5):
         lane = f"lane_{index}"
-        direction = directions.get(lane, "unknown") if directions else "unknown"
+        direction = directions.get(lane)
+        if direction not in {"up", "down"}:
+            raise RuntimeError(
+                f"Krung Thon timetable must define {lane} as 'up' or 'down', "
+                f"got {direction!r}"
+            )
         result[lane] = {
             "direction": direction,
             "enforcement_direction": direction,
             "source": "schedule_112",
             "schedule_direction": direction,
-            "schedule_period": period or "unknown",
+            "schedule_period": period or "default",
             "schedule_timestamp": timestamp.isoformat(sep=" ") if timestamp else None,
             "schedule_timestamp_source": timestamp_source,
             "schedule_confidence": 1.0 if timestamp else 0.0,

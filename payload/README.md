@@ -23,8 +23,11 @@ V2 ใช้ MQTT เท่านั้น:
 Tracker (camera 112)
   └─ every 15 seconds → traffic/krung_thon_bridge/CAM_112/gateway_input
        └─ MQTT Gateway
-            └─ every 1 minute → traffic/krung_thon_bridge/CAM_112/summary
+            └─ every 1 minute → v1/6610301004
 ```
+
+`v1/6610301004` เป็นรูปแบบ topic ที่ระบบ MQTT-to-Kafka ของ Lab รองรับอยู่แล้ว;
+ไม่เกี่ยวกับ V1 tracker ที่ถูกเก็บไว้ใน archive.
 
 ## Terminal 1 — MQTT Gateway
 

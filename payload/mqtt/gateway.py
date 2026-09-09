@@ -34,6 +34,13 @@ from common.traffic_payload import TrafficGatewayAggregator
 
 GATEWAY_LOCK_PATH = Path("/tmp/krung_thon_bridge_mqtt_gateway.lock")
 
+# V2 always gets the lane plan from its timetable.  Keep the human-readable
+# direction as an Influx tag, and publish this numeric companion for Grafana.
+DIRECTION_VALUE = {
+    "up": 1,
+    "down": 0,
+}
+
 
 def acquire_gateway_lock() -> Any:
     """Prevent two local Gateway processes from sharing one MQTT session."""
@@ -48,6 +55,17 @@ def acquire_gateway_lock() -> Any:
     return lock_file
 
 
+def direction_value(direction: Any) -> int:
+    """Convert one V2 timetable direction to its Grafana numeric value."""
+    normalized = str(direction).strip().lower()
+    if normalized not in DIRECTION_VALUE:
+        raise ValueError(
+            "V2 timetable lane direction must be 'up' or 'down', "
+            f"got {direction!r}"
+        )
+    return DIRECTION_VALUE[normalized]
+
+
 def to_option_a_payload(summary: dict[str, Any]) -> dict[str, Any]:
     """Flatten the traffic summary into the legacy ``id/payload`` envelope."""
     location = summary.get("location") or {}
@@ -57,11 +75,16 @@ def to_option_a_payload(summary: dict[str, Any]) -> dict[str, Any]:
     lane_counts = traffic.get("lane_vehicle_counts") or {}
     wrong_way_by_lane = wrong_way.get("by_lane") or {}
 
+    complete_window = bool((summary.get("window") or {}).get("complete_window", False))
     payload: dict[str, Any] = {
         "timestamp": int(summary.get("timestamp_unix", 0)),
         "timestamp_th": summary.get("timestamp", ""),
         "window_seconds": float((summary.get("window") or {}).get("seconds", 0.0)),
-        "complete_window": bool((summary.get("window") or {}).get("complete_window", False)),
+        # Preserve the existing boolean field so older InfluxDB data remains
+        # type-compatible. Use the numeric companion for Grafana charts.
+        "complete_window": complete_window,
+        # 1 = a complete aggregation window; 0 = partial window at shutdown.
+        "complete_window_value": int(complete_window),
         "vehicle_count": int(traffic.get("vehicle_count", 0)),
         "wrong_way_count": int(wrong_way.get("count", 0)),
         "wrong_way_rate_per_100_vehicles": float(
@@ -71,6 +94,7 @@ def to_option_a_payload(summary: dict[str, Any]) -> dict[str, Any]:
     for number in range(1, 5):
         lane_id = f"lane_{number}"
         lane = lanes.get(lane_id) or {}
+        direction = str(lane.get("direction", "")).strip().lower()
         wrong_way_lane = wrong_way_by_lane.get(lane_id) or {}
         vehicle_count = int(
             lane_counts.get(lane_id, wrong_way_lane.get("vehicle_count", 0))
@@ -78,7 +102,8 @@ def to_option_a_payload(summary: dict[str, Any]) -> dict[str, Any]:
         wrong_way_count = int(wrong_way_lane.get("count", 0))
         payload.update(
             {
-                f"{lane_id}_direction": str(lane.get("direction", "unknown")),
+                f"{lane_id}_direction": direction,
+                f"{lane_id}_direction_value": direction_value(direction),
                 f"{lane_id}_vehicle_count": vehicle_count,
                 f"{lane_id}_wrong_way_count": wrong_way_count,
                 f"{lane_id}_wrong_way_rate_per_100": float(

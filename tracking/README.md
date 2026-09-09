@@ -1,15 +1,13 @@
-# Tracking entry points
+# V2 Tracking — Krung Thon Bridge
 
-เลือกใช้เพียงโฟลเดอร์เดียวต่อครั้ง:
+ระบบที่ใช้งานจริงมีเฉพาะ V2: กล้อง 112 หนึ่งกล้อง, YOLO/ByteTrack สำหรับติดตามรถ,
+และตารางเวลาเพื่อกำหนดทิศทางของ 4 เลน
 
 ```bash
-# V1: กล้อง 112 + 147 + 156 และอ่านสัญญาณไฟ
-cd "/Users/dolphin/Desktop/Mini Project/tracking/v1"
-python3 vehicle_tracking.py
-
-# V2: กล้อง 112 เท่านั้น; เลือกไฟล์หรือ live stream ใน v2/settings.py
 cd "/Users/dolphin/Desktop/Mini Project/tracking/v2"
-python3 vehicle_tracking.py
+python3 -B vehicle_tracking.py
 ```
 
-อย่ารันไฟล์ที่ระดับ `tracking/` เพราะรันแยกตาม v1 หรือ v2 แล้ว.
+เลือก live stream หรือคลิปทดสอบได้ใน `tracking/v2/settings.py`.
+V1 สามกล้องถูกเก็บอ้างอิงไว้ที่ `archive/tracking/v1/` และไม่ใช่ส่วนของ flow
+ปัจจุบัน.

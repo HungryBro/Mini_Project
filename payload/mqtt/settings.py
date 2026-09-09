@@ -9,8 +9,9 @@ STUDENT_ID = "6610301004"
 
 # Tracker publishes one local window each minute to this topic.
 GATEWAY_INPUT_TOPIC = "traffic/krung_thon_bridge/CAM_112/gateway_input"
-# Option A: publish the legacy-compatible envelope that the existing lab
-# pipeline accepts through its ``v1/+`` subscription.
+# Publish the V2 summary in the legacy-compatible topic format required by
+# the existing lab MQTT-to-Kafka connector.  This ``v1`` is a topic protocol,
+# not the archived V1 tracker.
 SUMMARY_TOPIC = f"v1/{STUDENT_ID}"
 
 TRACKER_CLIENT_ID = "vehicle_tracker_CAM_112"

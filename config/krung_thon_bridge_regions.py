@@ -1,4 +1,4 @@
-"""Fixed camera regions for the Krung Thon Bridge pair.
+"""Fixed camera-112 regions for the Krung Thon Bridge V2 tracker.
 
 The coordinates were clicked on the native 800x450 camera frames.  The
 helpers scale them if a caller supplies a resized frame, so the same config
@@ -61,46 +61,6 @@ CAMERA_112_LANES = {
 }
 
 
-# Camera 147: each lane has its original signal ROI plus a backup ROI from a
-# second visible signal set. The backup is only needed when the primary is
-# unreadable, but keeping both lets the pipeline cross-check the LED colour.
-CAMERA_147_SIGNAL_ROIS = {
-    "lane_1": {
-        "primary": _polygon([[136, 1], [141, 24], [252, 22], [249, 1], [135, 0]]),
-        "backup": _polygon([[90, 52], [91, 58], [96, 57], [96, 52], [91, 52]]),
-    },
-    "lane_2": {
-        "primary": _polygon([[395, 4], [398, 11], [477, 11], [481, 1], [397, 0]]),
-        "backup": _polygon([[105, 49], [105, 56], [113, 54], [112, 47], [107, 48]]),
-    },
-    "lane_3": {
-        "primary": _polygon([[588, 1], [586, 12], [619, 15], [624, 2], [591, 0]]),
-        "backup": _polygon([[118, 44], [119, 53], [129, 52], [128, 44], [120, 44]]),
-    },
-    "lane_4": {
-        "primary": _polygon([[668, 0], [669, 28], [695, 31], [703, 1], [671, 0]]),
-        "backup": _polygon([[133, 42], [143, 40], [145, 49], [136, 51], [135, 43]]),
-    },
-}
-
-
-# Camera 156 is on the opposite side of the bridge.  Its left-to-right LEDs
-# correspond to camera 112's lanes 4, 3, 2, 1, respectively.  The dictionary
-# is deliberately keyed by the *camera 112 lane* so fusion never has to guess
-# which physical lane a light belongs to.
-CAMERA_156_SIGNAL_ROIS = {
-    "lane_1": {"primary": _polygon([[413, 2], [415, 14], [424, 13], [425, 3], [416, 3]])},
-    "lane_2": {"primary": _polygon([[396, 1], [396, 11], [407, 14], [408, 2], [399, 1]])},
-    # Camera 156 is reversed, so its second light from the left is lane 3 in
-    # camera 112. The right-side ROI below is that light's backup view.
-    "lane_3": {
-        "primary": _polygon([[378, 0], [378, 12], [392, 14], [392, 3], [379, 1]]),
-        "backup": _polygon([[762, 4], [742, 36], [797, 54], [798, 3], [764, 1]]),
-    },
-    "lane_4": {"primary": _polygon([[362, 0], [362, 11], [372, 12], [375, 2], [363, 1]])},
-}
-
-
 def scale_polygon(points: np.ndarray, frame: np.ndarray) -> np.ndarray:
     """Scale native 800x450 points to ``frame`` resolution."""
     height, width = frame.shape[:2]
@@ -118,23 +78,6 @@ def camera_112_roi(frame: np.ndarray) -> np.ndarray:
 
 def camera_112_lane_rois(frame: np.ndarray) -> dict[str, np.ndarray]:
     return {name: scale_polygon(points, frame) for name, points in CAMERA_112_LANES.items()}
-
-
-def _scale_signal_roi_sets(
-    roi_sets: dict[str, dict[str, np.ndarray]], frame: np.ndarray
-) -> dict[str, dict[str, np.ndarray]]:
-    return {
-        lane: {name: scale_polygon(points, frame) for name, points in roi_set.items()}
-        for lane, roi_set in roi_sets.items()
-    }
-
-
-def camera_147_signal_rois(frame: np.ndarray) -> dict[str, dict[str, np.ndarray]]:
-    return _scale_signal_roi_sets(CAMERA_147_SIGNAL_ROIS, frame)
-
-
-def camera_156_signal_rois(frame: np.ndarray) -> dict[str, dict[str, np.ndarray]]:
-    return _scale_signal_roi_sets(CAMERA_156_SIGNAL_ROIS, frame)
 
 
 def point_lane(point: tuple[float, float], lane_rois: dict[str, np.ndarray]) -> str | None:

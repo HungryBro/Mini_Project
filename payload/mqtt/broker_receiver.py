@@ -1,4 +1,4 @@
-"""Receive and display traffic.v1 JSON payloads over MQTT."""
+"""Receive and display V2 traffic-summary JSON payloads over MQTT."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ except ImportError:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Receive traffic.v1 JSON payloads over MQTT")
+    parser = argparse.ArgumentParser(description="Receive V2 traffic-summary JSON payloads over MQTT")
     parser.add_argument("--broker", default=MQTT_BROKER, help="MQTT broker host")
     parser.add_argument("--port", type=int, default=MQTT_PORT, help="MQTT broker port")
     parser.add_argument(
