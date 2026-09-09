@@ -1,0 +1,18 @@
+[Unit]
+Description=Traffic 6610301004 MQTT to InfluxDB
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=telegraf
+Group=telegraf
+EnvironmentFile=/etc/traffic-telegraf/.env
+ExecStart=/usr/bin/telegraf --config /etc/traffic-telegraf/telegraf-mqtt.conf
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

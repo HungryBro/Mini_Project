@@ -1,0 +1,6 @@
+from(bucket: "mini_project")
+  |> range(start: -30m)
+  |> filter(fn: (r) => r._measurement == "traffic_6610301004")
+  |> filter(fn: (r) => r.field_id == "6610301004")
+  |> filter(fn: (r) => r._field == "vehicle_count" or r._field == "lane_1_direction_value")
+  |> last()

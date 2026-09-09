@@ -31,7 +31,7 @@ python3 -B vehicle_tracking.py
 
 ## ข้อมูลสำหรับ InfluxDB และ Grafana
 
-ข้อมูลเขียนลง bucket `mini_project`, measurement `traffic_6610301004` และ tag
+ข้อมูลใหม่เขียนลง bucket `mini_project`, measurement `traffic_6610301004` และ tag
 `field_id=6610301004`.
 
 ค่าที่ทำกราฟได้ เช่น `vehicle_count`, `wrong_way_count`, ข้อมูลรถแต่ละเลน และ
