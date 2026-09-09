@@ -9,8 +9,7 @@ cloud Telegraf → InfluxDB mini_project → Grafana.
 Input topic: v1/6610301004. Measurement: traffic_6610301004.
 field_id is read from the gateway payload as a tag; expected value is 6610301004.
 The separate measurement keeps this traffic stream distinct from other students.
-All 22 field mappings and seven tag mappings retain the old Kafka parser's types.
-complete_window stays boolean; use complete_window_value for numeric graphs.
+All 19 field mappings and seven tag mappings retain their intended numeric types.
 Timestamp comes from payload.timestamp (Unix seconds), not ingestion time.
 
 ## Cloud administrator installation

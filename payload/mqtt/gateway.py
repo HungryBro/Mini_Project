@@ -75,16 +75,9 @@ def to_option_a_payload(summary: dict[str, Any]) -> dict[str, Any]:
     lane_counts = traffic.get("lane_vehicle_counts") or {}
     wrong_way_by_lane = wrong_way.get("by_lane") or {}
 
-    complete_window = bool((summary.get("window") or {}).get("complete_window", False))
     payload: dict[str, Any] = {
         "timestamp": int(summary.get("timestamp_unix", 0)),
         "timestamp_th": summary.get("timestamp", ""),
-        "window_seconds": float((summary.get("window") or {}).get("seconds", 0.0)),
-        # Preserve the existing boolean field so older InfluxDB data remains
-        # type-compatible. Use the numeric companion for Grafana charts.
-        "complete_window": complete_window,
-        # 1 = a complete aggregation window; 0 = partial window at shutdown.
-        "complete_window_value": int(complete_window),
         "vehicle_count": int(traffic.get("vehicle_count", 0)),
         "wrong_way_count": int(wrong_way.get("count", 0)),
         "wrong_way_rate_per_100_vehicles": float(
