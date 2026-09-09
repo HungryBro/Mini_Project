@@ -7,7 +7,7 @@
 Camera 112 / YOLO + ByteTrack
   → MQTT Gateway (15 วินาที → Summary 1 นาที)
   → VerneMQ
-  → Kafka Connect → Kafka → Telegraf
+  → Direct MQTT-to-Influx Collector
   → InfluxDB mini_project → Grafana
 ```
 

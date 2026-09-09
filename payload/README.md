@@ -62,3 +62,17 @@ python3 mqtt/broker_receiver.py
 `common/traffic_payload.py` ยังใช้งานอยู่โดยทั้ง Tracker และ MQTT Gateway
 จึงไม่ย้ายไป archive. ส่วน `archive/udp/` เป็นโค้ด UDP เก่าที่เก็บไว้เผื่อ
 อ้างอิงเท่านั้น และไม่ถูกเรียกใช้ใน V2.
+
+## Terminal 3 — Direct InfluxDB Collector
+
+เปิดตัวนี้พร้อม Gateway และ Tracker เพื่อรับ summary จาก VerneMQ แล้วเขียน
+เข้า InfluxDB Cloud โดยตรง:
+
+~~~bash
+cd "/Users/dolphin/Desktop/Mini Project"
+python3 -B payload/mqtt/influxdb_collector.py
+~~~
+
+ข้อมูลเข้า bucket mini_project, measurement traffic_6610301004 และ tag
+field_id=6610301004. ค่าเชื่อมต่ออยู่ใน infrastructure/traffic-cloud-telegraf/.env
+และไม่ถูกเก็บใน Git. เติม --once ท้ายคำสั่งเพื่อทดสอบเพียงหนึ่ง summary.
