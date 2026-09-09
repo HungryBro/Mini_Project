@@ -36,7 +36,6 @@ COLLECTOR_CLIENT_ID = f"influx_collector_{STUDENT_ID}"
 
 TAG_PATHS = {
     "field_id": "field_id",
-    "name": "name",
     "place_id": "place_id",
     "lane_1_direction": "payload.lane_1_direction",
     "lane_2_direction": "payload.lane_2_direction",
@@ -46,7 +45,6 @@ TAG_PATHS = {
 FIELD_TYPES = {
     "vehicle_count": "int",
     "wrong_way_count": "int",
-    "wrong_way_rate_per_100_vehicles": "float",
     "lane_1_direction_value": "int",
     "lane_2_direction_value": "int",
     "lane_3_direction_value": "int",

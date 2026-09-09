@@ -103,7 +103,7 @@ python3 -B payload/mqtt/kafka_bridge.py --setup
 
 การส่งเป็น at-least-once: อาจซ้ำหากโปรแกรมหยุดระหว่าง Kafka รับสำเร็จและลบ
 รายการบนดิสก์ หรือ MQTT ส่งซ้ำ. Producer idempotence ไม่ขจัดการซ้ำข้าม restart.
-Consumer ควรใช้ `field_id`, `name`, `timestamp` เป็นคีย์ตรวจซ้ำ.
+Consumer ควรใช้ `field_id`, `place_id`, `timestamp` เป็นคีย์ตรวจซ้ำ.
 Persistent MQTT session ไม่ได้กู้ข้อมูลก่อนการ subscribe ครั้งแรก.
 ให้เปิด bridge ค้างไว้ระหว่างใช้งาน; การทดสอบ `--once` จบแล้วจะหยุดโปรแกรม.
 

@@ -78,9 +78,6 @@ def to_option_a_payload(summary: dict[str, Any]) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "vehicle_count": int(traffic.get("vehicle_count", 0)),
         "wrong_way_count": int(wrong_way.get("count", 0)),
-        "wrong_way_rate_per_100_vehicles": float(
-            wrong_way.get("rate_per_100_vehicles", 0.0)
-        ),
     }
     for number in range(1, 5):
         lane_id = f"lane_{number}"
@@ -106,7 +103,6 @@ def to_option_a_payload(summary: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": summary.get("id", f"ID_{summary.get('student_id', '')}"),
         "field_id": str(summary.get("student_id", "")),
-        "name": location.get("camera_id", "CAM_112"),
         "place_id": location.get("site_id", "krung_thon_bridge"),
         "timestamp": int(summary.get("timestamp_unix", 0)),
         "timestamp_th": summary.get("timestamp", ""),
