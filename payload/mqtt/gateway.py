@@ -11,6 +11,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import fcntl
+
 PAYLOAD_DIRECTORY = Path(__file__).resolve().parents[1]
 if str(PAYLOAD_DIRECTORY) not in sys.path:
     sys.path.insert(0, str(PAYLOAD_DIRECTORY))
@@ -28,6 +30,22 @@ from mqtt.settings import (
     SUMMARY_TOPIC,
 )
 from common.traffic_payload import TrafficGatewayAggregator
+
+
+GATEWAY_LOCK_PATH = Path("/tmp/krung_thon_bridge_mqtt_gateway.lock")
+
+
+def acquire_gateway_lock() -> Any:
+    """Prevent two local Gateway processes from sharing one MQTT session."""
+    lock_file = GATEWAY_LOCK_PATH.open("w", encoding="utf-8")
+    try:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock_file.close()
+        raise SystemExit(
+            "Gateway is already running. Stop the existing mqtt/gateway.py process first."
+        )
+    return lock_file
 
 
 def to_option_a_payload(summary: dict[str, Any]) -> dict[str, Any]:
@@ -71,6 +89,7 @@ def to_option_a_payload(summary: dict[str, Any]) -> dict[str, Any]:
 
     return {
         "id": summary.get("id", f"ID_{summary.get('student_id', '')}"),
+        "field_id": str(summary.get("student_id", "")),
         "name": location.get("camera_id", "CAM_112"),
         "place_id": location.get("site_id", "krung_thon_bridge"),
         "payload": payload,
@@ -100,6 +119,7 @@ def print_payload(label: str, payload: dict[str, Any], *, topic: str) -> None:
 
 
 def main() -> None:
+    gateway_lock = acquire_gateway_lock()
     aggregator = TrafficGatewayAggregator(
         window_seconds=GATEWAY_CLOUD_WINDOW_SECONDS,
         student_id=STUDENT_ID,
@@ -168,6 +188,7 @@ def main() -> None:
             client.disconnect()
         except Exception:
             pass
+        gateway_lock.close()
 
 
 if __name__ == "__main__":

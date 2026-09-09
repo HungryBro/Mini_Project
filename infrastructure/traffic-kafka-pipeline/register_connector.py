@@ -89,6 +89,28 @@ def wait_for_connect(connect_url: str, wait_seconds: float) -> None:
             time.sleep(3)
 
 
+def wait_for_running(connect_url: str, name: str, wait_seconds: float) -> Any:
+    """Registration is asynchronous; verify the connector AND its source tasks."""
+    status_url = f"{connect_url}/connectors/{quote(name, safe='')}/status"
+    deadline = time.monotonic() + wait_seconds
+    while True:
+        try:
+            status = request_json(status_url)
+        except HTTPError as error:
+            if error.code != 404 or time.monotonic() >= deadline:
+                raise
+        else:
+            entries = [status.get("connector", {})] + status.get("tasks", [])
+            failed = [entry for entry in entries if entry.get("state") == "FAILED"]
+            if failed:
+                raise RuntimeError("Kafka Connect task failed: " + json.dumps(failed))
+            if status.get("tasks") and all(entry.get("state") == "RUNNING" for entry in entries):
+                return status
+        if time.monotonic() >= deadline:
+            raise TimeoutError("Connector registered, but its tasks are not RUNNING yet")
+        time.sleep(2)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Register the VerneMQ-to-Kafka traffic connector"
@@ -113,8 +135,8 @@ def main() -> None:
         wait_for_connect(connect_url, args.wait_seconds)
         config_url = f"{connect_url}/connectors/{quote(name, safe='')}/config"
         request_json(config_url, method="PUT", payload=config)
-        status = request_json(f"{connect_url}/connectors/{quote(name, safe='')}/status")
-    except (HTTPError, URLError, TimeoutError) as error:
+        status = wait_for_running(connect_url, name, args.wait_seconds)
+    except (HTTPError, URLError, TimeoutError, RuntimeError) as error:
         raise SystemExit(f"Connector registration failed: {error}") from error
 
     print("MQTT -> Kafka connector is registered.")

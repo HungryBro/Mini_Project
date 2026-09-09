@@ -63,16 +63,16 @@ docker compose exec kafka kafka-console-consumer \
 
 ## 5. ตรวจ InfluxDB
 
-Telegraf จะอ่าน Kafka และเขียน measurement `traffic_summary` ลง bucket
+Telegraf จะอ่าน Kafka และเขียน measurement `traffic_6610301004` ลง bucket
 `mini_project` อัตโนมัติ ตรวจด้วย Flux:
 
 ```flux
 from(bucket: "mini_project")
   |> range(start: -1h)
-  |> filter(fn: (r) => r._measurement == "traffic_summary")
+  |> filter(fn: (r) => r._measurement == "traffic_6610301004")
 ```
 
-ข้อมูลแต่ละชุดมี Influx tag `id = ID_6610301004` เพื่อแยกข้อมูลของงานนี้
+ข้อมูลแต่ละชุดมี Influx tag `field_id = 6610301004` เพื่อแยกข้อมูลของงานนี้
 ออกจากสมาชิกคนอื่นใน bucket เดียวกัน ส่วน `camera_id = CAM_112` ยังระบุกล้อง
 ตามปกติ
 

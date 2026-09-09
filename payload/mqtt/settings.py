@@ -14,5 +14,5 @@ GATEWAY_INPUT_TOPIC = "traffic/krung_thon_bridge/CAM_112/gateway_input"
 SUMMARY_TOPIC = f"v1/{STUDENT_ID}"
 
 TRACKER_CLIENT_ID = "vehicle_tracker_CAM_112"
-GATEWAY_CLIENT_ID = "vehicle_gateway_CAM_112"
+GATEWAY_CLIENT_ID = f"vehicle_gateway_{STUDENT_ID}_CAM_112"
 GATEWAY_CLOUD_WINDOW_SECONDS = 60.0
