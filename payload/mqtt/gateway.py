@@ -94,9 +94,6 @@ def to_option_a_payload(summary: dict[str, Any]) -> dict[str, Any]:
                 f"{lane_id}_direction_value": direction_value(direction),
                 f"{lane_id}_vehicle_count": vehicle_count,
                 f"{lane_id}_wrong_way_count": wrong_way_count,
-                f"{lane_id}_wrong_way_rate_per_100": float(
-                    wrong_way_lane.get("rate_per_100_vehicles", 0.0)
-                ),
             }
         )
 

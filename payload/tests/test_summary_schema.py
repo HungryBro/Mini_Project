@@ -48,6 +48,7 @@ class SummarySchemaTests(unittest.TestCase):
         self.assertNotIn("timestamp_th", result["payload"])
         self.assertNotIn("name", result)
         self.assertNotIn("wrong_way_rate_per_100_vehicles", result["payload"])
+        self.assertFalse(any("rate_per_100" in key for key in result["payload"]))
 
     def test_influx_uses_top_level_timestamp_as_point_time(self):
         result = to_option_a_payload(self.summary)

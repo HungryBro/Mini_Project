@@ -51,16 +51,12 @@ FIELD_TYPES = {
     "lane_4_direction_value": "int",
     "lane_1_vehicle_count": "int",
     "lane_1_wrong_way_count": "int",
-    "lane_1_wrong_way_rate_per_100": "float",
     "lane_2_vehicle_count": "int",
     "lane_2_wrong_way_count": "int",
-    "lane_2_wrong_way_rate_per_100": "float",
     "lane_3_vehicle_count": "int",
     "lane_3_wrong_way_count": "int",
-    "lane_3_wrong_way_rate_per_100": "float",
     "lane_4_vehicle_count": "int",
     "lane_4_wrong_way_count": "int",
-    "lane_4_wrong_way_rate_per_100": "float",
 }
 
 
