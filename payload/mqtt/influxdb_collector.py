@@ -133,9 +133,12 @@ def to_line_protocol(payload: dict[str, Any]) -> str:
         f"{name}={format_field(nested_value(payload, f'payload.{name}'), field_type)}"
         for name, field_type in FIELD_TYPES.items()
     )
-    timestamp = int(nested_value(payload, "payload.timestamp"))
+    timestamp = int(nested_value(payload, "timestamp"))
     if timestamp <= 0:
-        raise ValueError("payload.timestamp must be a positive Unix timestamp")
+        raise ValueError("timestamp must be a positive Unix timestamp")
+    timestamp_th = nested_value(payload, "timestamp_th")
+    if not isinstance(timestamp_th, str) or not timestamp_th:
+        raise ValueError("timestamp_th must be a non-empty ISO-8601 string")
     return f"{escape_measurement(MEASUREMENT)},{tags} {fields} {timestamp}"
 
 
@@ -229,7 +232,7 @@ def main() -> None:
             values = payload["payload"]
             print(
                 f"[INFLUX WRITE OK] measurement={MEASUREMENT} "
-                f"field_id={STUDENT_ID} timestamp={values['timestamp_th']} "
+                f"field_id={STUDENT_ID} timestamp={payload['timestamp_th']} "
                 f"vehicles={values['vehicle_count']} "
                 f"wrong_way={values['wrong_way_count']}",
                 flush=True,

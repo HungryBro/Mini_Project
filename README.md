@@ -5,10 +5,11 @@
 
 ```text
 Camera 112 / YOLO + ByteTrack
-  → MQTT Gateway (15 วินาที → Summary 1 นาที)
-  → VerneMQ
-  → Direct MQTT-to-Influx Collector
-  → InfluxDB mini_project → Grafana
+  → VerneMQ (gateway_input ทุก 15 วินาที)
+  → MQTT Gateway (รวม Summary 1 นาที)
+  → VerneMQ (v1/6610301004)
+      ├─ Influx Collector → InfluxDB mini_project → Grafana
+      └─ Kafka Bridge → Kafka Cloud 172.16.2.117:9092
 ```
 
 ## รันระบบ
@@ -28,6 +29,23 @@ python3 -B vehicle_tracking.py
 ```
 
 รายละเอียดแหล่งวิดีโอ โมเดล และตารางเวลาอยู่ใน `tracking/v2/settings.py`.
+
+เปิดอีก Terminal สำหรับส่งเข้า InfluxDB:
+
+```bash
+cd "/Users/dolphin/Desktop/Mini Project"
+python3 -B payload/mqtt/influxdb_collector.py
+```
+
+เปิดอีก Terminal สำหรับส่งเข้า Kafka Cloud:
+
+```bash
+cd "/Users/dolphin/Desktop/Mini Project"
+python3 -B payload/mqtt/kafka_bridge.py
+```
+
+ใช้งานทั้งสองปลายทางพร้อมกันได้โดยไม่ต้องเปิด Docker.
+รายละเอียดการเชื่อมต่อและทดสอบอ่านข้อมูลกลับอยู่ใน [คู่มือ Kafka](payload/mqtt/KAFKA.md).
 
 ## ข้อมูลสำหรับ InfluxDB และ Grafana
 

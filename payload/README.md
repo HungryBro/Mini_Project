@@ -1,5 +1,7 @@
 # Payload — Krung Thon Bridge
 
+Kafka Cloud: ดู [วิธีรันและสถานะการเชื่อมต่อ](mqtt/KAFKA.md).
+
 โฟลเดอร์นี้แบ่งตามหน้าที่ ไม่ปนกัน:
 
 ```text
@@ -7,7 +9,10 @@ payload/
 ├── mqtt/
 │   ├── settings.py          # Broker, topics และ MQTT IDs (ที่ใช้งานจริง)
 │   ├── gateway.py           # Gateway: รับ 15 วินาที → รวม/ส่ง Summary 1 นาที
-│   └── broker_receiver.py   # ดู Summary ที่ Broker (ไม่บังคับ)
+│   ├── broker_receiver.py   # ดู Summary ที่ Broker (ไม่บังคับ)
+│   ├── influxdb_collector.py # MQTT → InfluxDB Cloud
+│   ├── kafka_bridge.py      # MQTT → Kafka Cloud
+│   └── kafka_connection.py  # แปลงที่อยู่ broker เฉพาะ Kafka client
 ├── common/
 │   └── traffic_payload.py   # รูปแบบ payload + ตัวรวมข้อมูลที่ MQTT Gateway ใช้
 └── tools/
@@ -26,8 +31,8 @@ Tracker (camera 112)
             └─ every 1 minute → v1/6610301004
 ```
 
-`v1/6610301004` เป็นรูปแบบ topic ที่ระบบ MQTT-to-Kafka ของ Lab รองรับอยู่แล้ว;
-ไม่เกี่ยวกับ V1 tracker ที่ถูกเก็บไว้ใน archive.
+`v1/6610301004` เป็น summary topic ที่ collector และ Kafka bridge ของเรา subscribe;
+เลข v1 ไม่เกี่ยวกับ V1 tracker ที่ถูกเก็บไว้ใน archive.
 
 ## Terminal 1 — MQTT Gateway
 

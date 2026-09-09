@@ -76,8 +76,6 @@ def to_option_a_payload(summary: dict[str, Any]) -> dict[str, Any]:
     wrong_way_by_lane = wrong_way.get("by_lane") or {}
 
     payload: dict[str, Any] = {
-        "timestamp": int(summary.get("timestamp_unix", 0)),
-        "timestamp_th": summary.get("timestamp", ""),
         "vehicle_count": int(traffic.get("vehicle_count", 0)),
         "wrong_way_count": int(wrong_way.get("count", 0)),
         "wrong_way_rate_per_100_vehicles": float(
@@ -110,6 +108,8 @@ def to_option_a_payload(summary: dict[str, Any]) -> dict[str, Any]:
         "field_id": str(summary.get("student_id", "")),
         "name": location.get("camera_id", "CAM_112"),
         "place_id": location.get("site_id", "krung_thon_bridge"),
+        "timestamp": int(summary.get("timestamp_unix", 0)),
+        "timestamp_th": summary.get("timestamp", ""),
         "payload": payload,
     }
 
@@ -120,7 +120,7 @@ def print_payload(label: str, payload: dict[str, Any], *, topic: str) -> None:
     traffic = payload.get("traffic", {}) if legacy is None else legacy
     wrong_way = payload.get("wrong_way", {}) if legacy is None else legacy
     start = window.get("start") if legacy is None else "legacy"
-    end = window.get("end") if legacy is None else legacy.get("timestamp_th")
+    end = window.get("end") if legacy is None else payload.get("timestamp_th")
     wrong_way_count = (
         wrong_way.get("count", 0)
         if legacy is None
