@@ -20,8 +20,9 @@ GATEWAY_CLOUD_WINDOW_SECONDS = 60.0
 
 # Cloud Kafka; no local Docker broker is needed.
 KAFKA_BOOTSTRAP_SERVERS = "172.16.2.117:9092"
-KAFKA_TOPIC = "traffic.krung_thon_bridge.summary.v1"
+KAFKA_TOPIC = "traffic_6610301004"
 KAFKA_BRIDGE_CLIENT_ID = f"mqtt_kafka_bridge_{STUDENT_ID}"
+KAFKA_ML_CONSUMER_GROUP = f"traffic_ml_{STUDENT_ID}"
 # The Lab advertises this alias. Translate it only inside our Kafka client.
 # If the Lab later advertises its Cloud IP directly, this entry is simply unused.
 KAFKA_ADDRESS_MAP = {"localhost:9092": "172.16.2.117:9092"}
