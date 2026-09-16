@@ -1073,10 +1073,17 @@ def run_jsonl_replay_mode(settings: Any) -> None:
             "Please specify REPLAY_JSONL_FILE in tracking/v2/settings.py."
         )
 
+    replay_realtime = bool(getattr(settings, "REPLAY_REALTIME", True))
+    replay_speed = float(getattr(settings, "REPLAY_SPEED", 1.0))
+    if replay_speed <= 0:
+        replay_realtime = False
+
+    speed_label = f"{replay_speed}x speed" if replay_realtime else "DISABLED (Max speed)"
     print("\n==================================================")
     print(" 🚀 [OPTION 1 REPLAY MODE] Starting JSONL Replay ")
     print("==================================================")
     print(f"JSONL Input File: {input_path}")
+    print(f"Real-Time Pacing: {speed_label}")
     print(f"Target MQTT Broker: {MQTT_BROKER}:{MQTT_PORT}")
     print(f"Target Gateway Topic: {GATEWAY_INPUT_TOPIC}")
     print("--------------------------------------------------")
@@ -1101,14 +1108,20 @@ def run_jsonl_replay_mode(settings: Any) -> None:
             mqtt_client = None
 
     gateway_window_seconds = float(getattr(settings, "GATEWAY_WINDOW_SECONDS", 15.0))
+    # Use current Bangkok time as anchor so timestamps stream live NOW
+    anchor_time = datetime.now(BANGKOK_TIMEZONE)
     aggregator = TrafficWindowAggregator(
         window_seconds=gateway_window_seconds,
         student_id=STUDENT_ID,
+        anchor_time=anchor_time,
         use_wall_clock=False,
     )
 
     frames = 0
     payloads_sent = 0
+    start_wall_time = time.time()
+    first_time_sec: float | None = None
+
     try:
         with input_path.open("r", encoding="utf-8") as handle:
             for line_number, line in enumerate(handle, start=1):
@@ -1119,7 +1132,21 @@ def run_jsonl_replay_mode(settings: Any) -> None:
                 except json.JSONDecodeError as err:
                     print(f"Warning: Invalid JSON at line {line_number}: {err}")
                     continue
+                
                 frames += 1
+                t_sec = float(record.get("time_seconds", 0.0))
+                if first_time_sec is None:
+                    first_time_sec = t_sec
+                    start_wall_time = time.time()
+
+                # Real-time pacing: sleep until current frame time is reached
+                if replay_realtime:
+                    target_elapsed = (t_sec - first_time_sec) / replay_speed
+                    actual_elapsed = time.time() - start_wall_time
+                    sleep_needed = target_elapsed - actual_elapsed
+                    if sleep_needed > 0:
+                        time.sleep(sleep_needed)
+
                 completed = aggregator.add_frame(record)
                 for payload in completed:
                     payloads_sent += 1
@@ -1135,7 +1162,6 @@ def run_jsonl_replay_mode(settings: Any) -> None:
                     if mqtt_client:
                         encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
                         mqtt_client.publish(GATEWAY_INPUT_TOPIC, encoded, qos=MQTT_QOS)
-                    time.sleep(0.3)
 
             final_payload = aggregator.flush()
             if final_payload:

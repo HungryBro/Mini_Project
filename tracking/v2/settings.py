@@ -29,6 +29,12 @@ CAMERA_112_FILE = PROJECT_DIRECTORY / "locations/krung_thon_bridge/v2_have_wrron
 # หากเป็น None ระบบจะเลือกไฟล์ JSONL ล่าสุดจาก LOG_DIRECTORY (runs/live_logs) ให้อัตโนมัติ
 REPLAY_JSONL_FILE = None
 
+# สำหรับโหมด "replay": เล่นตามเวลาจริง (Real-Time Pacing)
+# True = ส่งข้อมูลตามเวลาจริงของคลิป (เช่น คลิป 7 นาที จะค่อยๆ คายข้อมูลส่งตลอด 7 นาทีจริง)
+# REPLAY_SPEED = 1.0 (1.0 = ความเร็วเท่าเวลาจริง, 2.0 = เร็วขึ้น 2 เท่า, 0 = ส่งทันทีเร็วที่สุด)
+REPLAY_REALTIME = True
+REPLAY_SPEED = 1.0
+
 # สวิตช์สลับแหล่งข้อมูลวิดีโอตาม SOURCE_MODE
 if str(SOURCE_MODE).lower() in ("live_stream", "stream", "url", "live"):
     CAMERA_112_SOURCE = CAMERA_112_STREAM_URL
