@@ -69,7 +69,7 @@ def stage(db, row):
             (place, ts - 30 * 86400, ts))]
         status, fields = analyze(history)
         db.execute("INSERT INTO outbox(line) VALUES (?)", (
-            point(f"traffic_lane_model_{STUDENT_ID}", row, fields, status),))
+            point(ML_MEASUREMENT, row, fields, status),))
         db.execute("INSERT OR REPLACE INTO fits VALUES (?,?)", (place, ts))
         return status
 

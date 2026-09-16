@@ -36,13 +36,12 @@ Ctrl+C หยุดได้ เปิดคำสั่งเดิมเพื
 
 ## ข้อมูลใน InfluxDB
 
-Worker A แยกผลเป็น 2 measurement โดยมี tag `field_id=6610301004`, `place_id`,
-`model_version` ทั้งคู่:
+ระบบส่งข้อมูลใหม่เข้า InfluxDB เพียง 2 measurement:
 
-| กลุ่ม field | ความหมาย |
+| Measurement | กลุ่ม field | ความหมาย |
 |---|---|
-| `traffic_ml_6610301004` — `lane_3_wrong_way_rate_pct`, `lane_3_vehicle_count`, `lane_mode_31` และอื่น ๆ | จำนวนรถ/ย้อนศรจริง อัตรารวม อัตราเลน 3 และโหมดเลน ทุก summary; มี tag `lane_mode` |
-| `traffic_lane_model_6610301004` — `model_ready`, `adjusted_odds_ratio`, `odds_ratio_ci_low` และอื่น ๆ | สถิติสะสมและผล Binomial regression คำนวณใหม่ทุก 10 นาทีของข้อมูล; มี tag `status` |
+| `traffic_6610301004` | `vehicle_count`, `wrong_way_count`, ข้อมูลรายเลน และ `lane_N_direction_value` | ข้อมูลดิบจาก Gateway ทุก summary |
+| `traffic_ml_6610301004` | `lane_3_wrong_way_rate_pct`, `lane_mode_31`, `model_ready`, `adjusted_odds_ratio` และอื่น ๆ | ผลจาก Worker A ทั้งค่าที่สรุปจากข้อมูลดิบและผล Binomial regression; แถวสรุปมี tag `lane_mode` ส่วนแถวผลโมเดลมี tag `status` |
 
 ข้อมูลดิบ `traffic_6610301004` ยังมาจาก collector เดิม
 Worker A คำนวณร้อยละเอง ไม่เพิ่ม rate กลับเข้า MQTT payload
@@ -91,8 +90,8 @@ from(bucket: "mini_project")
 ข้อมูล Kafka เก่าอาจอยู่นอก Past 15m ให้ขยายช่วงตามเวลาข้อความ
 หากเลน 3 ไม่มีรถให้ลอง `_field == "lane_3_vehicle_count"` แทน
 
-ตรวจสถานะโมเดลด้วย query เดียวกัน เปลี่ยน measurement เป็น
-`traffic_lane_model_6610301004` และ `_field` เป็น `model_ready`
+ตรวจสถานะโมเดลด้วย query เดียวกัน โดยใช้ measurement เดิม
+`traffic_ml_6610301004` และเปลี่ยน `_field` เป็น `model_ready`
 
 5. Grafana (Influx data source ภาษา Flux) ใช้:
 

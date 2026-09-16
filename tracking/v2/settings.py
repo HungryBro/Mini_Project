@@ -23,11 +23,11 @@ SOURCE_MODE = "replay"  # เลือกใช้: "live_stream" (กล้อ�
 CAMERA_112_STREAM_URL = "https://drr-kt-svr02.enixma.net/live/192.168.8.112.stream/playlist.m3u8"
 
 # คลิปวิดีโอไฟล์ในเครื่องสำหรับทดสอบ
-CAMERA_112_FILE = PROJECT_DIRECTORY / "locations/krung_thon_bridge/final/krung_thon_bridge_final_10min.mp4"
+CAMERA_112_FILE = PROJECT_DIRECTORY / "locations/krung_thon_bridge/lfinal/krung_thon_bridge_final_10min.mp4"
 
 # สำหรับโหมด "replay" (แบบที่ 1): ระบุไฟล์ JSONL ย้อนหลังที่ต้องการเล่น
-# ดึงจากชุดข้อมูลรวม 10 นาที ( Mode 2/2 -> Mode 3/1 ) ใน locations/krung_thon_bridge/final
-REPLAY_JSONL_FILE = PROJECT_DIRECTORY / "locations/krung_thon_bridge/final/krung_thon_bridge_final_10min.jsonl"
+# ดึงจากชุดข้อมูลรวม 10 นาที ( Mode 2/2 -> Mode 3/1 ) ใน locations/krung_thon_bridge/lfinal
+REPLAY_JSONL_FILE = PROJECT_DIRECTORY / "locations/krung_thon_bridge/lfinal/krung_thon_bridge_final_10min.jsonl"
 
 # สำหรับโหมด "replay": เล่นตามเวลาจริง (Real-Time Pacing)
 # True = ส่งข้อมูลตามเวลาจริงของคลิป (เช่น คลิป 7 นาที จะค่อยๆ คายข้อมูลส่งตลอด 7 นาทีจริง)
