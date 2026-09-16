@@ -97,12 +97,16 @@ def to_option_a_payload(summary: dict[str, Any]) -> dict[str, Any]:
             }
         )
 
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    now_bangkok = datetime.now(ZoneInfo("Asia/Bangkok"))
+
     return {
         "id": summary.get("id", f"ID_{summary.get('student_id', '')}"),
         "field_id": str(summary.get("student_id", "")),
         "place_id": location.get("site_id", "krung_thon_bridge"),
-        "timestamp": int(summary.get("timestamp_unix", 0)),
-        "timestamp_th": summary.get("timestamp", ""),
+        "timestamp": int(now_bangkok.timestamp()),
+        "timestamp_th": now_bangkok.isoformat(timespec="seconds"),
         "payload": payload,
     }
 

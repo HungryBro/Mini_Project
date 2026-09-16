@@ -103,7 +103,12 @@ class AnalysisTests(unittest.TestCase):
             self.assertEqual(db.execute('SELECT COUNT(*) FROM outbox').fetchone()[0], 2)
             with patch('ml.lane_effect_worker.write_to_influx') as writer:
                 self.assertEqual(flush(db, {'INFLUX_BUCKET':'mini_project'}), 2)
-                self.assertIn('traffic_lane_observed_6610301004', writer.call_args.args[0])
+                lines = writer.call_args.args[0].splitlines()
+                self.assertEqual(len(lines), 2)
+                self.assertTrue(any(line.startswith('traffic_ml_6610301004,') for line in lines))
+                self.assertTrue(any(line.startswith('traffic_lane_model_6610301004,') for line in lines))
+                self.assertTrue(any('lane_mode=2_2' in line for line in lines))
+                self.assertTrue(any('status=' in line for line in lines))
             self.assertEqual(db.execute('SELECT COUNT(*) FROM outbox').fetchone()[0], 0)
             self.assertEqual(stage(db, row), 'duplicate')
             db.close()

@@ -36,12 +36,13 @@ Ctrl+C หยุดได้ เปิดคำสั่งเดิมเพื
 
 ## ข้อมูลใน InfluxDB
 
-ทั้งสอง measurement มี tag `field_id=6610301004`, `place_id`, `model_version`:
+Worker A แยกผลเป็น 2 measurement โดยมี tag `field_id=6610301004`, `place_id`,
+`model_version` ทั้งคู่:
 
-| Measurement | ความหมาย |
+| กลุ่ม field | ความหมาย |
 |---|---|
-| `traffic_lane_observed_6610301004` | จำนวนรถ/ย้อนศรจริง อัตรารวม อัตราเลน 3 และโหมดเลน ทุก summary |
-| `traffic_lane_model_6610301004` | สถิติสะสมและผล Binomial regression คำนวณใหม่ทุก 10 นาทีของข้อมูล |
+| `traffic_ml_6610301004` — `lane_3_wrong_way_rate_pct`, `lane_3_vehicle_count`, `lane_mode_31` และอื่น ๆ | จำนวนรถ/ย้อนศรจริง อัตรารวม อัตราเลน 3 และโหมดเลน ทุก summary; มี tag `lane_mode` |
+| `traffic_lane_model_6610301004` — `model_ready`, `adjusted_odds_ratio`, `odds_ratio_ci_low` และอื่น ๆ | สถิติสะสมและผล Binomial regression คำนวณใหม่ทุก 10 นาทีของข้อมูล; มี tag `status` |
 
 ข้อมูลดิบ `traffic_6610301004` ยังมาจาก collector เดิม
 Worker A คำนวณร้อยละเอง ไม่เพิ่ม rate กลับเข้า MQTT payload
@@ -80,7 +81,7 @@ python3 -B payload/ml/lane_effect_worker.py --status
 ```flux
 from(bucket: "mini_project")
   |> range(start: -7d)
-  |> filter(fn: (r) => r._measurement == "traffic_lane_observed_6610301004")
+  |> filter(fn: (r) => r._measurement == "traffic_ml_6610301004")
   |> filter(fn: (r) => r.field_id == "6610301004")
   |> filter(fn: (r) => r._field == "lane_3_wrong_way_rate_pct")
   |> last()
@@ -98,7 +99,7 @@ from(bucket: "mini_project")
 ```flux
 from(bucket: "mini_project")
   |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
-  |> filter(fn: (r) => r._measurement == "traffic_lane_observed_6610301004")
+  |> filter(fn: (r) => r._measurement == "traffic_ml_6610301004")
   |> filter(fn: (r) => r.field_id == "6610301004")
   |> filter(fn: (r) => r._field == "lane_3_wrong_way_rate_pct")
 ```

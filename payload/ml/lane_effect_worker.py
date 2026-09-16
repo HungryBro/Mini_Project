@@ -18,6 +18,7 @@ from mqtt.settings import KAFKA_ADDRESS_MAP, KAFKA_BOOTSTRAP_SERVERS, KAFKA_TOPI
 
 DB_PATH = ROOT / "runs" / "ml_a" / "history.sqlite3"
 GROUP = f"traffic_lane_effect_{STUDENT_ID}_v1"
+ML_MEASUREMENT = f"traffic_ml_{STUDENT_ID}"
 
 
 def open_db(path):
@@ -59,7 +60,7 @@ def stage(db, row):
     with db:
         db.execute("INSERT INTO observations VALUES (?,?,?)", (place, ts, encoded))
         db.execute("INSERT INTO outbox(line) VALUES (?)", (
-            point(f"traffic_lane_observed_{STUDENT_ID}", row, observed_fields(row)),))
+            point(ML_MEASUREMENT, row, observed_fields(row)),))
         last = db.execute("SELECT ts FROM fits WHERE place=?", (place,)).fetchone()
         if last and ts < last[0] + 600:
             return "observed"

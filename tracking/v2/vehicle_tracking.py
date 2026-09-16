@@ -1079,6 +1079,7 @@ def run_jsonl_replay_mode(settings: Any) -> None:
 
     replay_realtime = bool(getattr(settings, "REPLAY_REALTIME", True))
     replay_speed = float(getattr(settings, "REPLAY_SPEED", 1.0))
+    replay_loop = bool(getattr(settings, "REPLAY_LOOP", True))
     show_window = bool(getattr(settings, "REPLAY_SHOW_WINDOW", True)) and (mp4_path is not None)
 
     if replay_speed <= 0:
@@ -1092,6 +1093,7 @@ def run_jsonl_replay_mode(settings: Any) -> None:
     print(f"MP4 Video File:   {mp4_path if mp4_path else 'None (Headless mode)'}")
     print(f"Video Window:     {'ENABLED (Press q to stop)' if show_window else 'DISABLED'}")
     print(f"Real-Time Pacing: {speed_label}")
+    print(f"Looping Mode:     {'ENABLED' if replay_loop else 'DISABLED'}")
     print(f"Target MQTT Broker: {MQTT_BROKER}:{MQTT_PORT}")
     print(f"Target Gateway Topic: {GATEWAY_INPUT_TOPIC}")
     print("--------------------------------------------------")
@@ -1121,7 +1123,7 @@ def run_jsonl_replay_mode(settings: Any) -> None:
         window_seconds=gateway_window_seconds,
         student_id=STUDENT_ID,
         anchor_time=anchor_time,
-        use_wall_clock=False,
+        use_wall_clock=True,
     )
 
     cap: Any | None = None
@@ -1147,57 +1149,75 @@ def run_jsonl_replay_mode(settings: Any) -> None:
 
     frames = 0
     payloads_sent = 0
-    start_wall_time = time.time()
-    first_time_sec: float | None = None
+    user_stopped = False
+    loop_count = 0
 
     try:
-        with input_path.open("r", encoding="utf-8") as handle:
-            for line_number, line in enumerate(handle, start=1):
-                if not line.strip():
-                    continue
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError as err:
-                    print(f"Warning: Invalid JSON at line {line_number}: {err}")
-                    continue
-                
-                frames += 1
-                t_sec = float(record.get("time_seconds", 0.0))
-                if first_time_sec is None:
-                    first_time_sec = t_sec
-                    start_wall_time = time.time()
-
+        while True:
+            loop_count += 1
+            if loop_count > 1:
+                print(f"\n🔄 [REPLAY LOOP #{loop_count}] Restarting replay session from frame 0...")
                 if cap and cap.isOpened():
                     import cv2
-                    ret, frame = cap.read()
-                    if ret:
-                        cv2.imshow(window_name, frame)
-                        key = cv2.waitKey(delay_ms) & 0xFF
-                        if key == ord("q"):
-                            print("\nUser pressed 'q' - Stopping video replay.")
-                            break
-                elif replay_realtime:
-                    target_elapsed = (t_sec - first_time_sec) / replay_speed
-                    actual_elapsed = time.time() - start_wall_time
-                    sleep_needed = target_elapsed - actual_elapsed
-                    if sleep_needed > 0:
-                        time.sleep(sleep_needed)
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
-                completed = aggregator.add_frame(record)
-                for payload in completed:
-                    payloads_sent += 1
-                    window = payload.get("window", {})
-                    traffic = payload.get("traffic", {})
-                    ww = payload.get("wrong_way", {})
-                    print(
-                        f"[MQTT GATEWAY OUT] #{payloads_sent} {window.get('start')} -> {window.get('end')} "
-                        f"| vehicles={traffic.get('unique_vehicle_count', traffic.get('vehicle_count', 0))} "
-                        f"wrong_way={ww.get('count', 0)}",
-                        flush=True,
-                    )
-                    if mqtt_client:
-                        encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-                        mqtt_client.publish(GATEWAY_INPUT_TOPIC, encoded, qos=MQTT_QOS)
+            start_wall_time = time.time()
+            first_time_sec: float | None = None
+
+            with input_path.open("r", encoding="utf-8") as handle:
+                for line_number, line in enumerate(handle, start=1):
+                    if not line.strip():
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError as err:
+                        print(f"Warning: Invalid JSON at line {line_number}: {err}")
+                        continue
+                    
+                    frames += 1
+                    t_sec = float(record.get("time_seconds", 0.0))
+                    if first_time_sec is None:
+                        first_time_sec = t_sec
+                        start_wall_time = time.time()
+
+                    if cap and cap.isOpened():
+                        import cv2
+                        ret, frame = cap.read()
+                        if not ret:
+                            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                            ret, frame = cap.read()
+                        if ret:
+                            cv2.imshow(window_name, frame)
+                            key = cv2.waitKey(delay_ms) & 0xFF
+                            if key == ord("q"):
+                                print("\nUser pressed 'q' - Stopping video replay.")
+                                user_stopped = True
+                                break
+                    elif replay_realtime:
+                        target_elapsed = (t_sec - first_time_sec) / replay_speed
+                        actual_elapsed = time.time() - start_wall_time
+                        sleep_needed = target_elapsed - actual_elapsed
+                        if sleep_needed > 0:
+                            time.sleep(sleep_needed)
+
+                    completed = aggregator.add_frame(record)
+                    for payload in completed:
+                        payloads_sent += 1
+                        window = payload.get("window", {})
+                        traffic = payload.get("traffic", {})
+                        ww = payload.get("wrong_way", {})
+                        print(
+                            f"[MQTT GATEWAY OUT] #{payloads_sent} {window.get('start')} -> {window.get('end')} "
+                            f"| vehicles={traffic.get('unique_vehicle_count', traffic.get('vehicle_count', 0))} "
+                            f"wrong_way={ww.get('count', 0)}",
+                            flush=True,
+                        )
+                        if mqtt_client:
+                            encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                            mqtt_client.publish(GATEWAY_INPUT_TOPIC, encoded, qos=MQTT_QOS)
+
+            if user_stopped or not replay_loop:
+                break
 
             final_payload = aggregator.flush()
             if final_payload:

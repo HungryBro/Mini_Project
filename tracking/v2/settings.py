@@ -23,11 +23,11 @@ SOURCE_MODE = "replay"  # เลือกใช้: "live_stream" (กล้อ�
 CAMERA_112_STREAM_URL = "https://drr-kt-svr02.enixma.net/live/192.168.8.112.stream/playlist.m3u8"
 
 # คลิปวิดีโอไฟล์ในเครื่องสำหรับทดสอบ
-CAMERA_112_FILE = PROJECT_DIRECTORY / "locations/krung_thon_bridge/v2_have_wrrongway/krung_thon_bridge_cam112_v2_1min.mp4"
+CAMERA_112_FILE = PROJECT_DIRECTORY / "locations/krung_thon_bridge/final/krung_thon_bridge_final_10min.mp4"
 
 # สำหรับโหมด "replay" (แบบที่ 1): ระบุไฟล์ JSONL ย้อนหลังที่ต้องการเล่น
-# หากเป็น None ระบบจะเลือกไฟล์ JSONL ล่าสุดจาก LOG_DIRECTORY (runs/live_logs) ให้อัตโนมัติ
-REPLAY_JSONL_FILE = None
+# ดึงจากชุดข้อมูลรวม 10 นาที ( Mode 2/2 -> Mode 3/1 ) ใน locations/krung_thon_bridge/final
+REPLAY_JSONL_FILE = PROJECT_DIRECTORY / "locations/krung_thon_bridge/final/krung_thon_bridge_final_10min.jsonl"
 
 # สำหรับโหมด "replay": เล่นตามเวลาจริง (Real-Time Pacing)
 # True = ส่งข้อมูลตามเวลาจริงของคลิป (เช่น คลิป 7 นาที จะค่อยๆ คายข้อมูลส่งตลอด 7 นาทีจริง)
@@ -38,6 +38,10 @@ REPLAY_SPEED = 1.0
 # สำหรับโหมด "replay": แสดงหน้าต่างวิดีโอ MP4 ไปพร้อมกับการส่งข้อมูล (Video Window Preview)
 # True = เปิดหน้าต่างวิดีโอ OpenCV แสดงภาพคลิปวิดีโอเคลื่อนไหวไปด้วยพร้อมส่ง MQTT (กด q เพื่อหยุด)
 REPLAY_SHOW_WINDOW = True
+
+# สำหรับโหมด "replay": เล่นวนลูปต่อเนื่อง (Looping Mode)
+# True = เล่นวิดีโอและส่งข้อมูลวนลูปไปเรื่อยๆ ไม่จบสิ้น (กด q หรือ Ctrl+C เพื่อหยุด)
+REPLAY_LOOP = True
 
 # สวิตช์สลับแหล่งข้อมูลวิดีโอตาม SOURCE_MODE
 if str(SOURCE_MODE).lower() in ("live_stream", "stream", "url", "live"):
