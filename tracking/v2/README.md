@@ -14,12 +14,14 @@ ByteTrack ดิบ: รถต้องข้าม Wrong-Way Gate ใด Gate �
 ช่วยให้รถที่เริ่มถูก track หลังเส้นหนึ่ง ยังมีโอกาสถูกยืนยันจากเส้นถัดไป โดยไม่
 กลับไปพึ่งการสั่นของกล่องตรวจจับเพียงอย่างเดียว
 
-เลือกแหล่งวิดีโอใน `settings.py` ของโฟลเดอร์นี้:
+เลือกแหล่งข้อมูลใน `settings.py` ของโฟลเดอร์นี้:
 
 ```python
+SOURCE_MODE = "replay"       # แบบที่ 1: Replay ข้อมูล JSONL ย้อนหลัง (ไม่ต้องใช้กล้องสด)
+# หรือ
 SOURCE_MODE = "live_stream"  # กล้องสด
 # หรือ
-SOURCE_MODE = "video_files"  # ไฟล์ CAMERA_112_FILE
+SOURCE_MODE = "video_files"  # ไฟล์วิดีโอ MP4 ในเครื่อง (CAMERA_112_FILE)
 ```
 
 วิธีรัน:

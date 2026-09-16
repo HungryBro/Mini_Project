@@ -1038,11 +1038,140 @@ def schedule_lane_signals_from_112(
         }
     return result
 
+def run_jsonl_replay_mode(settings: Any) -> None:
+    """Run Option 1: Replay JSONL log records directly into MQTT Gateway."""
+    import time
+    log_root = Path(settings.LOG_DIRECTORY).expanduser()
+    replay_setting = getattr(settings, "REPLAY_JSONL_FILE", None)
+
+    input_path: Path | None = None
+    if replay_setting:
+        candidate = Path(replay_setting)
+        if not candidate.is_absolute():
+            candidate = PROJECT_ROOT / candidate
+        if candidate.is_file():
+            input_path = candidate
+
+    if not input_path:
+        logs = sorted(
+            log_root.glob("**/*_camera112.jsonl"),
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        )
+        if not logs:
+            logs = sorted(
+                log_root.glob("**/*.jsonl"),
+                key=lambda item: item.stat().st_mtime,
+                reverse=True,
+            )
+        if logs:
+            input_path = logs[0]
+
+    if not input_path or not input_path.is_file():
+        raise SystemExit(
+            f"No JSONL log file found for replay in {log_root}.\n"
+            "Please specify REPLAY_JSONL_FILE in tracking/v2/settings.py."
+        )
+
+    print("\n==================================================")
+    print(" 🚀 [OPTION 1 REPLAY MODE] Starting JSONL Replay ")
+    print("==================================================")
+    print(f"JSONL Input File: {input_path}")
+    print(f"Target MQTT Broker: {MQTT_BROKER}:{MQTT_PORT}")
+    print(f"Target Gateway Topic: {GATEWAY_INPUT_TOPIC}")
+    print("--------------------------------------------------")
+
+    mqtt_client = None
+    if bool(getattr(settings, "ENABLE_MQTT_GATEWAY", True)):
+        try:
+            import paho.mqtt.client as mqtt
+
+            try:
+                mqtt_client = mqtt.Client(
+                    client_id=TRACKER_CLIENT_ID,
+                    callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
+                )
+            except AttributeError:
+                mqtt_client = mqtt.Client(client_id=TRACKER_CLIENT_ID)
+            mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
+            mqtt_client.loop_start()
+            print(f"Connected to MQTT broker {MQTT_BROKER}:{MQTT_PORT}")
+        except Exception as err:
+            print(f"[MQTT WARNING] Replay could not connect to MQTT Broker: {err}")
+            mqtt_client = None
+
+    gateway_window_seconds = float(getattr(settings, "GATEWAY_WINDOW_SECONDS", 15.0))
+    aggregator = TrafficWindowAggregator(
+        window_seconds=gateway_window_seconds,
+        student_id=STUDENT_ID,
+        use_wall_clock=False,
+    )
+
+    frames = 0
+    payloads_sent = 0
+    try:
+        with input_path.open("r", encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, start=1):
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError as err:
+                    print(f"Warning: Invalid JSON at line {line_number}: {err}")
+                    continue
+                frames += 1
+                completed = aggregator.add_frame(record)
+                for payload in completed:
+                    payloads_sent += 1
+                    window = payload.get("window", {})
+                    traffic = payload.get("traffic", {})
+                    ww = payload.get("wrong_way", {})
+                    print(
+                        f"[MQTT GATEWAY OUT] #{payloads_sent} {window.get('start')} -> {window.get('end')} "
+                        f"| vehicles={traffic.get('unique_vehicle_count', traffic.get('vehicle_count', 0))} "
+                        f"wrong_way={ww.get('count', 0)}",
+                        flush=True,
+                    )
+                    if mqtt_client:
+                        encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                        mqtt_client.publish(GATEWAY_INPUT_TOPIC, encoded, qos=MQTT_QOS)
+                    time.sleep(0.3)
+
+            final_payload = aggregator.flush()
+            if final_payload:
+                payloads_sent += 1
+                window = final_payload.get("window", {})
+                traffic = final_payload.get("traffic", {})
+                ww = final_payload.get("wrong_way", {})
+                print(
+                    f"[MQTT GATEWAY OUT] #{payloads_sent} (Final) {window.get('start')} -> {window.get('end')} "
+                    f"| vehicles={traffic.get('unique_vehicle_count', traffic.get('vehicle_count', 0))} "
+                    f"wrong_way={ww.get('count', 0)}",
+                    flush=True,
+                )
+                if mqtt_client:
+                    encoded = json.dumps(final_payload, ensure_ascii=False).encode("utf-8")
+                    mqtt_client.publish(GATEWAY_INPUT_TOPIC, encoded, qos=MQTT_QOS)
+    finally:
+        if mqtt_client:
+            mqtt_client.loop_stop()
+            mqtt_client.disconnect()
+
+    print("--------------------------------------------------")
+    print(f"Replay complete: {frames} frames processed -> {payloads_sent} payload(s) sent.")
+    print("==================================================\n")
+
+
 def run_v2_single_camera_from_settings() -> None:
     """Run v2: camera 112 detects vehicles and its timetable sets lane direction."""
     import settings
 
+    source_mode = str(getattr(settings, "SOURCE_MODE", "")).lower()
     source_value = getattr(settings, "CAMERA_112_SOURCE", "")
+    if source_mode in ("replay", "jsonl_replay", "jsonl") or str(source_value).lower() == "replay":
+        run_jsonl_replay_mode(settings)
+        return
+
     source: str | Path = str(source_value) if _is_url(source_value) else Path(source_value).expanduser()
     model_path = Path(settings.MODEL_PATH).expanduser()
     tracker_path = Path(settings.TRACKER_PATH).expanduser()

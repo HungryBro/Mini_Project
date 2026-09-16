@@ -16,8 +16,8 @@ TRACKING_DIRECTORY = Path(__file__).resolve().parent
 # v2 อยู่ใน tracking/v2 จึงย้อนขึ้นสองระดับเพื่อหารากของโปรเจกต์
 PROJECT_DIRECTORY = TRACKING_DIRECTORY.parents[1]
 
-# โหมดแหล่งข้อมูลวิดีโอ ("video_files" หรือ "live_stream")
-SOURCE_MODE = "live_stream"  # ใช้ "video_files" เมื่อต้องการทดสอบจากคลิปในเครื่อง
+# โหมดแหล่งข้อมูล ("live_stream", "video_files", หรือ "replay")
+SOURCE_MODE = "replay"  # เลือกใช้: "live_stream" (กล้องสด), "video_files" (คลิปในเครื่อง), หรือ "replay" (แบบที่ 1: Replay ข้อมูล JSONL เก่าย้อนหลัง)
 
 # ลิงก์สตรีมสด HLS (.m3u8) ของกล้อง 112
 CAMERA_112_STREAM_URL = "https://drr-kt-svr02.enixma.net/live/192.168.8.112.stream/playlist.m3u8"
@@ -25,9 +25,15 @@ CAMERA_112_STREAM_URL = "https://drr-kt-svr02.enixma.net/live/192.168.8.112.stre
 # คลิปวิดีโอไฟล์ในเครื่องสำหรับทดสอบ
 CAMERA_112_FILE = PROJECT_DIRECTORY / "locations/krung_thon_bridge/v2_have_wrrongway/krung_thon_bridge_cam112_v2_1min.mp4"
 
+# สำหรับโหมด "replay" (แบบที่ 1): ระบุไฟล์ JSONL ย้อนหลังที่ต้องการเล่น
+# หากเป็น None ระบบจะเลือกไฟล์ JSONL ล่าสุดจาก LOG_DIRECTORY (runs/live_logs) ให้อัตโนมัติ
+REPLAY_JSONL_FILE = None
+
 # สวิตช์สลับแหล่งข้อมูลวิดีโอตาม SOURCE_MODE
 if str(SOURCE_MODE).lower() in ("live_stream", "stream", "url", "live"):
     CAMERA_112_SOURCE = CAMERA_112_STREAM_URL
+elif str(SOURCE_MODE).lower() in ("replay", "jsonl_replay", "jsonl"):
+    CAMERA_112_SOURCE = "replay"
 else:
     CAMERA_112_SOURCE = CAMERA_112_FILE
 
