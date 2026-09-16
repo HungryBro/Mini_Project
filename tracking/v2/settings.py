@@ -35,6 +35,10 @@ REPLAY_JSONL_FILE = None
 REPLAY_REALTIME = True
 REPLAY_SPEED = 1.0
 
+# สำหรับโหมด "replay": แสดงหน้าต่างวิดีโอ MP4 ไปพร้อมกับการส่งข้อมูล (Video Window Preview)
+# True = เปิดหน้าต่างวิดีโอ OpenCV แสดงภาพคลิปวิดีโอเคลื่อนไหวไปด้วยพร้อมส่ง MQTT (กด q เพื่อหยุด)
+REPLAY_SHOW_WINDOW = True
+
 # สวิตช์สลับแหล่งข้อมูลวิดีโอตาม SOURCE_MODE
 if str(SOURCE_MODE).lower() in ("live_stream", "stream", "url", "live"):
     CAMERA_112_SOURCE = CAMERA_112_STREAM_URL

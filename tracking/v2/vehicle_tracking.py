@@ -1073,16 +1073,24 @@ def run_jsonl_replay_mode(settings: Any) -> None:
             "Please specify REPLAY_JSONL_FILE in tracking/v2/settings.py."
         )
 
+    parent_dir = input_path.parent
+    mp4_files = sorted(parent_dir.glob("*.mp4"))
+    mp4_path: Path | None = mp4_files[0] if mp4_files else None
+
     replay_realtime = bool(getattr(settings, "REPLAY_REALTIME", True))
     replay_speed = float(getattr(settings, "REPLAY_SPEED", 1.0))
+    show_window = bool(getattr(settings, "REPLAY_SHOW_WINDOW", True)) and (mp4_path is not None)
+
     if replay_speed <= 0:
         replay_realtime = False
 
     speed_label = f"{replay_speed}x speed" if replay_realtime else "DISABLED (Max speed)"
     print("\n==================================================")
-    print(" 🚀 [OPTION 1 REPLAY MODE] Starting JSONL Replay ")
+    print(" 🚀 [REPLAY MODE] Starting JSONL + MP4 Video Replay ")
     print("==================================================")
     print(f"JSONL Input File: {input_path}")
+    print(f"MP4 Video File:   {mp4_path if mp4_path else 'None (Headless mode)'}")
+    print(f"Video Window:     {'ENABLED (Press q to stop)' if show_window else 'DISABLED'}")
     print(f"Real-Time Pacing: {speed_label}")
     print(f"Target MQTT Broker: {MQTT_BROKER}:{MQTT_PORT}")
     print(f"Target Gateway Topic: {GATEWAY_INPUT_TOPIC}")
@@ -1108,7 +1116,6 @@ def run_jsonl_replay_mode(settings: Any) -> None:
             mqtt_client = None
 
     gateway_window_seconds = float(getattr(settings, "GATEWAY_WINDOW_SECONDS", 15.0))
-    # Use current Bangkok time as anchor so timestamps stream live NOW
     anchor_time = datetime.now(BANGKOK_TIMEZONE)
     aggregator = TrafficWindowAggregator(
         window_seconds=gateway_window_seconds,
@@ -1116,6 +1123,27 @@ def run_jsonl_replay_mode(settings: Any) -> None:
         anchor_time=anchor_time,
         use_wall_clock=False,
     )
+
+    cap: Any | None = None
+    window_name = "Camera 112 - Vehicle tracking (Replay)"
+    fps = 25.0
+    delay_ms = 40
+
+    if show_window and mp4_path:
+        try:
+            import cv2
+            cap = cv2.VideoCapture(str(mp4_path))
+            if cap.isOpened():
+                v_fps = cap.get(cv2.CAP_PROP_FPS)
+                if v_fps > 0:
+                    fps = v_fps
+                delay_ms = max(1, int(1000.0 / (fps * replay_speed))) if replay_realtime else 1
+                cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+            else:
+                cap = None
+        except Exception as err:
+            print(f"[REPLAY WARNING] Could not open video window: {err}")
+            cap = None
 
     frames = 0
     payloads_sent = 0
@@ -1139,8 +1167,16 @@ def run_jsonl_replay_mode(settings: Any) -> None:
                     first_time_sec = t_sec
                     start_wall_time = time.time()
 
-                # Real-time pacing: sleep until current frame time is reached
-                if replay_realtime:
+                if cap and cap.isOpened():
+                    import cv2
+                    ret, frame = cap.read()
+                    if ret:
+                        cv2.imshow(window_name, frame)
+                        key = cv2.waitKey(delay_ms) & 0xFF
+                        if key == ord("q"):
+                            print("\nUser pressed 'q' - Stopping video replay.")
+                            break
+                elif replay_realtime:
                     target_elapsed = (t_sec - first_time_sec) / replay_speed
                     actual_elapsed = time.time() - start_wall_time
                     sleep_needed = target_elapsed - actual_elapsed
@@ -1179,6 +1215,10 @@ def run_jsonl_replay_mode(settings: Any) -> None:
                     encoded = json.dumps(final_payload, ensure_ascii=False).encode("utf-8")
                     mqtt_client.publish(GATEWAY_INPUT_TOPIC, encoded, qos=MQTT_QOS)
     finally:
+        if cap:
+            import cv2
+            cap.release()
+            cv2.destroyAllWindows()
         if mqtt_client:
             mqtt_client.loop_stop()
             mqtt_client.disconnect()
